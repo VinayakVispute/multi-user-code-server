@@ -1,0 +1,120 @@
+events {
+ # Here are the events
+}
+
+http {
+    resolver 1.1.1.1 ipv6=off  valid=10s;
+
+    # Define upstream servers
+    upstream auth_server {
+        server unbiased-carefully-marmot.ngrok-free.app:443;  
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        # Authentication endpoint for nginx auth_request
+        location = /auth {
+            internal;  # Only accessible via subrequest
+            proxy_pass https://unbiased-carefully-marmot.ngrok-free.app/auth/validate/;
+            proxy_ssl_server_name on;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Host unbiased-carefully-marmot.ngrok-free.app;
+            
+            # Pass original request information to auth service
+            proxy_set_header X-Original-URI $request_uri;
+            proxy_set_header X-Original-Method $request_method;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Pass cookies and authorization headers
+            proxy_set_header Cookie $http_cookie;
+            proxy_set_header Authorization $http_authorization;
+            
+            # Set timeouts
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 5s;
+            proxy_send_timeout 5s;
+            access_log /var/log/nginx/auth.log;
+
+        }
+
+        # Assets don't need authentication
+        location /assets/ {
+            root /var/www/html;
+        }
+
+        # Health check endpoint (no auth required)
+        location /health {
+            proxy_pass https://auth_server/health;
+        }
+
+        # Heartbeat endpoint (protected)
+        location /heartbeat {
+            auth_request /auth;
+            proxy_ssl_server_name on;
+
+
+            auth_request_set $user_id $upstream_http_x_user_id;
+            auth_request_set $user_email $upstream_http_x_user_email;
+            auth_request_set $user_name $upstream_http_x_user_name;
+            
+            proxy_set_header X-User-ID $user_id;
+            proxy_set_header X-User-Email $user_email;
+
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            
+            proxy_pass https://unbiased-carefully-marmot.ngrok-free.app/ping;
+        }
+
+        # Main code-server location (protected)
+        location / {
+            auth_request /auth;
+            
+            # Handle auth errors
+            error_page 401 = @auth_error;
+            error_page 403 = @auth_error;
+            
+            # Pass user information from auth service to code-server
+            auth_request_set $user_id $upstream_http_x_user_id;
+            auth_request_set $user_email $upstream_http_x_user_email;
+            auth_request_set $user_name $upstream_http_x_user_name;
+            
+            # Disable gzip so sub_filter works
+            proxy_set_header Accept-Encoding "";
+
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            
+            # Pass user information to code-server
+            proxy_set_header X-User-ID $user_id;
+            proxy_set_header X-User-Email $user_email;
+            proxy_set_header X-User-Name $user_name;
+
+            # Proxy to code-server
+            proxy_pass http://127.0.0.1:8080/;
+
+
+
+            # Inject heartbeat script into all HTML responses
+            proxy_buffering on;
+            sub_filter_types text/html;
+            sub_filter_once off;
+            sub_filter '<head>' '<head><script defer src="/assets/heartbeat.js?v=1"></script>';        
+        }
+
+        # Error handling for authentication failures
+        location @auth_error {
+            return 302 http://localhost:3000/auth/sign-in;  # Replace with your actual frontend URL
+        }
+    }
+access_log /var/log/nginx/access.log;
+error_log /var/log/nginx/error.log notice;
+}
