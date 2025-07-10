@@ -1,52 +1,72 @@
-let pingInterval: any;
-
+const meta = (window as any).HEARTBEAT || {};
 const BASE_URL = "";
+let pingInterval: ReturnType<typeof setInterval> | undefined;
+
+async function sendHeartbeat() {
+  console.log(meta);
+  const payload = {
+    ts: Date.now(),
+    user: meta.u,
+    instanceId: meta.id,
+  };
+
+  console.log(payload);
+
+  if (!payload.user || !payload.instanceId) {
+    console.warn("⚠️ Heartbeat: Missing user or instanceId in meta");
+    return;
+  }
+
+  try {
+    const response = await fetch(`${BASE_URL}/heartbeat`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      console.error(
+        `🚨 Heartbeat failed: ${response.status} ${response.statusText}`
+      );
+
+      if (response.status === 401 || response.status === 403) {
+        console.warn("🔒 Unauthorized: redirecting to login");
+        return;
+      }
+
+      return;
+    }
+
+    try {
+      const data = await response.json();
+      console.log("✅ Heartbeat successful:", data);
+    } catch (parseError) {
+      console.warn("⚠️ Failed to parse heartbeat response as JSON");
+    }
+  } catch (networkError) {
+    console.error("🌐 Network error during heartbeat:", networkError);
+  }
+}
 
 function startHeartbeat() {
-  if (pingInterval) return; // already running
+  if (pingInterval) return;
 
-  pingInterval = setInterval(async () => {
-    try {
-      console.log("Sending heartbeat ping to", BASE_URL + "/heartbeat");
-
-      const response = await fetch(`${BASE_URL}/heartbeat`, {
-        body: JSON.stringify({ ts: Date.now() }),
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        console.error(
-          "Heartbeat failed:",
-          response.status,
-          response.statusText
-        );
-
-        // If unauthorized, redirect to login
-        if (response.status === 401 || response.status === 403) {
-          console.log("Authentication failed, redirecting to login");
-          window.location.href = "/auth/sign-in";
-          return;
-        }
-      } else {
-        const data = await response.json();
-        console.log("Heartbeat successful:", data);
-      }
-    } catch (error) {
-      console.error("Heartbeat error:", error);
-    }
-  }, 30000); // every 30 seconds (increased from 1 second)
+  console.log("⏱️ Heartbeat started");
+  pingInterval = setInterval(sendHeartbeat, 30_000);
+  sendHeartbeat(); // send immediately
 }
 
 function stopHeartbeat() {
-  clearInterval(pingInterval);
-  pingInterval = undefined;
+  if (pingInterval) {
+    clearInterval(pingInterval);
+    pingInterval = undefined;
+    console.log("⛔ Heartbeat stopped");
+  }
 }
 
-// Visibility change handler
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     startHeartbeat();
@@ -55,12 +75,10 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// Start immediately if tab is active
 if (document.visibilityState === "visible") {
   startHeartbeat();
 }
 
-// Also start on page load
 window.addEventListener("load", () => {
   startHeartbeat();
 });
