@@ -32,3 +32,11 @@ export interface InstanceInfo {
   isActive: boolean;
   publicIp?: string;
 }
+
+export interface AWSConfig {
+  region: string;
+  credentials: {
+    accessKeyId: string;
+    secretAccessKey: string;
+  };
+}

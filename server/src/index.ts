@@ -3,9 +3,8 @@ import path from "path";
 import dotenv from "dotenv";
 import cors from "cors";
 import { clerkClient, clerkMiddleware } from "@clerk/express";
-import { allocateMachine } from "../doc/allocateMachine";
 import { getUserFromInstance, updateUserPing } from "./utils/redis";
-import { getSystemStatus } from "./utils/machineManager";
+import { allocateMachine, getSystemStatus } from "./utils/machineManager";
 
 declare global {
   namespace Express {
