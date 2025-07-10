@@ -31,8 +31,14 @@ export default function DashboardClient({ firstName }: DashboardClientProps) {
                 },
                 withCredentials: true
             });
-            if (response.status === 200) {
+
+            if (response.status === 200 && response.data.success) {
                 alert("Machine allocated successfully!");
+                // Open the allocated machine in a new tab
+                const redirectUrl = response.data.data?.redirectUrl;
+                if (redirectUrl) {
+                    window.open(redirectUrl, '_self');
+                }
             } else {
                 alert("Failed to allocate machine");
             }
