@@ -1,0 +1,4 @@
+export enum INSTANCE_STATE {
+  RUNNING = "RUNNING",
+  STOPPED = "STOPPED",
+}
