@@ -1,12 +1,13 @@
 events {
- # Here are the events
+
+# Here are the events
+
 }
 
-
 http {
-        server {
-            listen 80;
-            server_name _;
+server {
+listen 80;
+server*name *;
 
           location /assets/ {
 
@@ -34,7 +35,8 @@ http {
                 proxy_buffering on;
                 sub_filter_types text/html;
                 sub_filter_once off;
-                sub_filter '<head>' '<head><script defer src="/assets/heartbeat.js?v=1"></script>';        
+                sub_filter '<head>' '<head><script defer src="/assets/heartbeat.js?v=1"></script>';
             }
         }
+
 }
