@@ -10,6 +10,10 @@ import {
 } from "./utils/redisUtils";
 import { allocateMachine, getSystemStatus } from "./utils/machineManager";
 import { webhookHandler } from "./utils/webhook";
+import {
+  startCleanupProcess,
+  stopCleanupProcess,
+} from "./utils/cleanUpManager";
 import logger from "./utils/logger";
 
 declare global {
@@ -28,6 +32,9 @@ const app = express();
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
+
+// Store cleanup interval reference for graceful shutdown
+let cleanupInterval: NodeJS.Timeout;
 
 app.use(
   clerkMiddleware({
@@ -409,9 +416,34 @@ app.use((req: Request, res: Response) => {
   });
 });
 
+// Graceful shutdown handling
+process.on("SIGTERM", () => {
+  logger.info("[system] [shutdown] Received SIGTERM, shutting down gracefully");
+
+  if (cleanupInterval) {
+    stopCleanupProcess(cleanupInterval);
+  }
+
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  logger.info("[system] [shutdown] Received SIGINT, shutting down gracefully");
+
+  if (cleanupInterval) {
+    stopCleanupProcess(cleanupInterval);
+  }
+
+  process.exit(0);
+});
+
 app.listen(PORT, () => {
   logger.info(`[system] [serverStart] Server started successfully`, {
     port: PORT,
     env: process.env.NODE_ENV,
   });
+
+  // Start the cleanup process
+  logger.info(`[system] [serverStart] Starting cleanup process`);
+  cleanupInterval = startCleanupProcess();
 });
