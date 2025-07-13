@@ -1,4 +1,5 @@
-import { INSTANCE_STATE } from "./../enum";
+import { INSTANCE_STATE } from "../lib/enum";
+
 export interface ApiResponse {
   message: string;
   status: "success" | "error" | "processing";
@@ -15,6 +16,8 @@ export interface ErrorResponse extends ApiResponse {
 export interface WorkspaceInfo {
   instanceId: string;
   publicIp: string;
+  customDomain: string;
+  subdomain: string;
   lastSeen: string;
   state: INSTANCE_STATE;
   ts: string;

@@ -1,5 +1,5 @@
 import { MAX_MACHINES, WARM_SPARE_COUNT } from "../config/awsConfig";
-import { INSTANCE_STATE } from "../enum";
+
 import {
   CleanupResult,
   ErrorResponse,
@@ -25,6 +25,8 @@ import {
   setUserWorkspace,
 } from "./redisUtils";
 import logger from "./logger";
+import { createWorkspaceNginxConfig, generateSubdomain } from "./nginxUtils";
+import { INSTANCE_STATE } from "../lib/enum";
 
 export async function ensureCapacity(requestId: string): Promise<void> {
   const functionName = "ensureCapacity";
@@ -65,6 +67,7 @@ export async function ensureCapacity(requestId: string): Promise<void> {
 
 export async function allocateMachine(
   userId: string,
+  userName: string,
   requestId: string
 ): Promise<SuccessResponse | ErrorResponse> {
   const functionName = "allocateMachine";
@@ -101,6 +104,8 @@ export async function allocateMachine(
         data: {
           instanceId: existingWorkspace.instanceId,
           publicUrl: existingWorkspace.publicIp,
+          subdomain: existingWorkspace.subdomain,
+          customDomain: existingWorkspace.customDomain,
         },
       };
     }
@@ -134,6 +139,9 @@ export async function allocateMachine(
     }
 
     shouldRollback = true;
+    const subdomain = generateSubdomain(userName, instanceId);
+    const httpsUrl = `https://${subdomain}.workspaces.codeclause.tech`;
+    await createWorkspaceNginxConfig(subdomain, publicIp);
     await tagInstance(instanceId, userId, requestId);
     await protectActiveInstances([instanceId], requestId);
 
@@ -141,6 +149,8 @@ export async function allocateMachine(
       instanceId,
       publicIp,
       lastSeen: now.toString(),
+      customDomain: httpsUrl,
+      subdomain: subdomain,
       state: INSTANCE_STATE.RUNNING,
       ts: now.toString(),
     };
@@ -158,7 +168,7 @@ export async function allocateMachine(
       success: true,
       message: "Machine allocated successfully",
       status: "success",
-      data: { instanceId, publicUrl: publicIp },
+      data: { instanceId, publicUrl: httpsUrl, directIp: publicIp },
     };
   } catch (error) {
     logger.error(

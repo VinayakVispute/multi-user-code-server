@@ -171,12 +171,17 @@ app.post(
       }
 
       const userEmail = user.emailAddresses[0]?.emailAddress || "No email";
+      const userName = user.username || `${user.firstName}-${user.lastName}`;
       logger.debug(`[${requestId}] [${functionName}] User authenticated`, {
         userId,
         userEmail,
       });
 
-      const allocatedMachineResponse = await allocateMachine(userId, requestId);
+      const allocatedMachineResponse = await allocateMachine(
+        userId,
+        userName,
+        requestId
+      );
 
       if (allocatedMachineResponse.success) {
         logger.info(

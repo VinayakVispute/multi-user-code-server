@@ -1,8 +1,8 @@
 import { WorkspaceInfo } from "../types/index";
 import redis from "../lib/redis";
-import { INSTANCE_STATE } from "../enum";
 import { IDLE_TIMEOUT_MS } from "../config/awsConfig";
 import logger from "./logger";
+import { INSTANCE_STATE } from "../lib/enum";
 
 export async function getUserWorkspace(
   userId: string,
@@ -16,7 +16,9 @@ export async function getUserWorkspace(
 
   try {
     const wsKey = `ws:${userId}`;
-    const userWorkspace = await redis.hgetall(wsKey);
+    const userWorkspace = (await redis.hgetall(
+      wsKey
+    )) as unknown as WorkspaceInfo;
 
     if (!userWorkspace || Object.keys(userWorkspace).length === 0) {
       logger.debug(
@@ -32,6 +34,8 @@ export async function getUserWorkspace(
       instanceId: userWorkspace.instanceId,
       publicIp: userWorkspace.publicIp,
       lastSeen: userWorkspace.lastSeen,
+      subdomain: userWorkspace.subdomain,
+      customDomain: userWorkspace.customDomain,
       state: userWorkspace.state as INSTANCE_STATE,
       ts: userWorkspace.ts,
     };
@@ -109,6 +113,8 @@ export async function setUserWorkspace(
       .hmset(wsKey, {
         instanceId: workspace.instanceId,
         publicIp: workspace.publicIp,
+        subdomain: workspace.subdomain,
+        customDomain: workspace.customDomain,
         lastSeen: workspace.lastSeen,
         state: workspace.state,
         ts: workspace.ts,
