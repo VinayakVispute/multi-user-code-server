@@ -3,7 +3,12 @@ import { Request, Response } from "express";
 import { DescribeInstancesCommand } from "@aws-sdk/client-ec2";
 import { ec2Client } from "../config/awsConfig";
 import { tagInstance } from "./awsUtils";
-import { addToWarmPool } from "./redisUtils";
+import {
+  addToWarmPool,
+  removeFromWarmPool,
+  getUserFromInstance,
+  cleanupUserData,
+} from "./redisUtils";
 import logger from "./logger";
 
 interface SNSMessage {
@@ -192,6 +197,67 @@ async function processNewInstanceWithRetries(
   return false;
 }
 
+async function processTerminatedInstance(
+  instanceId: string,
+  requestId: string
+): Promise<void> {
+  const functionName = "processTerminatedInstance";
+  logger.info(
+    `[${
+      requestId || "system"
+    }] [${functionName}] Processing terminated instance`,
+    { instanceId }
+  );
+
+  try {
+    // Remove from warm pool if it was in there
+    await removeFromWarmPool(instanceId, requestId);
+    logger.debug(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Removed instance from warm pool`,
+      { instanceId }
+    );
+
+    // Check if instance was assigned to a user
+    const userId = await getUserFromInstance(instanceId, requestId);
+
+    if (userId) {
+      logger.info(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Instance was assigned to user, cleaning up user data`,
+        { instanceId, userId }
+      );
+      await cleanupUserData(userId, instanceId, requestId);
+    } else {
+      logger.debug(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Instance was not assigned to any user`,
+        { instanceId }
+      );
+    }
+
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Successfully processed terminated instance`,
+      { instanceId, hadUser: !!userId }
+    );
+  } catch (error) {
+    logger.error(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Failed to process terminated instance`,
+      {
+        instanceId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    );
+  }
+}
+
 async function handleASGLifecycleEvent(
   event: ASGLifecycleEvent,
   requestId: string
@@ -206,26 +272,35 @@ async function handleASGLifecycleEvent(
     }
   );
 
-  if (event.Event !== "autoscaling:EC2_INSTANCE_LAUNCH") {
+  const instanceId = event.EC2InstanceId;
+
+  if (event.Event === "autoscaling:EC2_INSTANCE_LAUNCH") {
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Processing instance launch event`,
+      { instanceId, asgName: event.AutoScalingGroupName }
+    );
+    await processNewInstanceWithRetries(instanceId, 3, requestId);
+  } else if (event.Event === "autoscaling:EC2_INSTANCE_TERMINATE") {
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Processing instance terminate event`,
+      { instanceId, asgName: event.AutoScalingGroupName }
+    );
+    await processTerminatedInstance(instanceId, requestId);
+  } else {
     logger.debug(
-      `[${requestId || "system"}] [${functionName}] Ignoring non-launch event`,
+      `[${
+        requestId || "system"
+      }] [${functionName}] Ignoring unsupported event type`,
       {
         event: event.Event,
         instanceId: event.EC2InstanceId,
       }
     );
-    return;
   }
-
-  const instanceId = event.EC2InstanceId;
-  logger.info(
-    `[${
-      requestId || "system"
-    }] [${functionName}] Processing instance launch event`,
-    { instanceId, asgName: event.AutoScalingGroupName }
-  );
-
-  await processNewInstanceWithRetries(instanceId, 3, requestId);
 }
 
 export async function webhookHandler(
