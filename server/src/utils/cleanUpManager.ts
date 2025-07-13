@@ -18,6 +18,7 @@ import {
 import { WARM_SPARE_COUNT } from "../config/awsConfig";
 
 export async function cleanupIdleMachines(): Promise<CleanupResult> {
+  console.log(`🧹 [CleanupManager] Starting idle machine cleanup`);
   const result: CleanupResult = {
     terminatedInstances: [],
     cleanedUsers: [],
@@ -25,49 +26,56 @@ export async function cleanupIdleMachines(): Promise<CleanupResult> {
   };
 
   try {
-    console.log("Starting idle machine cleanup...");
-
+    console.log(`🔍 [CleanupManager] Getting idle users from Redis`);
     // Get idle users from Redis
     const idleUsers = await getIdleUsers();
 
     if (idleUsers.length === 0) {
-      console.log("No idle users found");
+      console.log(`✅ [CleanupManager] No idle users found - cleanup complete`);
       return result;
     }
 
     console.log(
-      `Found ${idleUsers.length} idle users: ${idleUsers.join(", ")}`
+      `📊 [CleanupManager] Found ${
+        idleUsers.length
+      } idle users: ${idleUsers.join(", ")}`
     );
 
     // Process each idle user
     for (const userId of idleUsers) {
+      console.log(`🔄 [CleanupManager] Processing idle user: ${userId}`);
       try {
         const workspace = await getUserWorkspace(userId);
 
         if (!workspace || !workspace.instanceId) {
-          console.warn(`No workspace found for idle user: ${userId}`);
+          console.warn(
+            `⚠️  [CleanupManager] No workspace found for idle user: ${userId}`
+          );
           continue;
         }
 
         const instanceId = workspace.instanceId;
         console.log(
-          `Terminating instance ${instanceId} for idle user ${userId}`
+          `🔴 [CleanupManager] Terminating instance ${instanceId} for idle user ${userId}`
         );
 
         // Remove from warm pool if it's there
+        console.log(`🗑️  [CleanupManager] Removing from warm pool`);
         await removeFromWarmPool(instanceId);
 
         // Safely terminate the instance (decrements ASG capacity)
+        console.log(`💥 [CleanupManager] Safely terminating instance`);
         await safelyTerminateInstance(instanceId);
 
         // Clean up Redis data
+        console.log(`🧹 [CleanupManager] Cleaning up Redis data`);
         await cleanupUserData(userId, instanceId);
 
         result.terminatedInstances.push(instanceId);
         result.cleanedUsers.push(userId);
 
         console.log(
-          `Successfully cleaned up user ${userId}, instance ${instanceId}`
+          `✅ [CleanupManager] Successfully cleaned up user ${userId}, instance ${instanceId}`
         );
       } catch (error) {
         const errorMsg = `Failed to cleanup user ${userId}: ${
