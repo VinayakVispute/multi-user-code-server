@@ -1,42 +1,42 @@
 events {
-
-# Here are the events
-
+worker_connections 1024;
 }
 
 http {
-server {
-listen 80;
-server*name *;
 
-          location /assets/ {
+    server {
+        listen 80 default_server;
+        server_name _;
 
-                root /var/www/html;
+        access_log /var/log/nginx/access.log;
+        error_log  /var/log/nginx/error.log notice;
 
+        location /assets/ {
+            root /var/www/html;
         }
 
-            location / {
-                # Disable gzip so sub_filter works
-                proxy_set_header Accept-Encoding "";
+        location /heartbeat {
+            proxy_pass https://multi-coder-server.codeclause.tech/ping;
 
-                # WebSocket support
-                proxy_http_version 1.1;
-                proxy_set_header Upgrade $http_upgrade;
-                proxy_set_header Connection "upgrade";
-                proxy_set_header Host $host;
-
-                # Proxy to code-server
-                proxy_pass http://127.0.0.1:8080/;
-
-
-                add_header X-Debug-Injected "yes";
-
-                # Inject heartbeat script into all HTML responses
-                proxy_buffering on;
-                sub_filter_types text/html;
-                sub_filter_once off;
-                sub_filter '<head>' '<head><script defer src="/assets/heartbeat.js?v=1"></script>';
-            }
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
+
+        location / {
+            proxy_pass http://127.0.0.1:8080/;
+
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+
+            proxy_set_header Accept-Encoding "";
+            sub_filter_once off;
+            sub_filter_types text/html;
+            sub_filter '</head>' '<script src="/assets/config.js"></script><script defer src="/assets/heartbeat.js?v=1"></script></head>';
+        }
+    }
 
 }

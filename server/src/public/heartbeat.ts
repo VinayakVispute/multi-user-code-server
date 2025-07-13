@@ -1,30 +1,13 @@
-const meta = (window as any).HEARTBEAT || {};
-const BASE_URL = "";
 let pingInterval: ReturnType<typeof setInterval> | undefined;
 
 async function sendHeartbeat() {
-  console.log(meta);
-  const payload = {
-    ts: Date.now(),
-    user: meta.u,
-    instanceId: meta.id,
-  };
-
-  console.log(payload);
-
-  if (!payload.user || !payload.instanceId) {
-    console.warn("⚠️ Heartbeat: Missing user or instanceId in meta");
-    return;
-  }
-
   try {
-    const response = await fetch(`${BASE_URL}/heartbeat`, {
+    const response = await fetch(`/api/ping`, {
       method: "POST",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -42,12 +25,24 @@ async function sendHeartbeat() {
 
     try {
       const data = await response.json();
-      console.log("✅ Heartbeat successful:", data);
+
+      if (data.success) {
+        console.log(
+          `✅ Heartbeat successful - Instance: ${data.instanceId}, Router status: ${data.routerResponse}`
+        );
+      } else {
+        console.warn("⚠️ Heartbeat response indicates failure");
+      }
     } catch (parseError) {
       console.warn("⚠️ Failed to parse heartbeat response as JSON");
     }
   } catch (networkError) {
     console.error("🌐 Network error during heartbeat:", networkError);
+
+    // Handle specific error cases
+    if (networkError instanceof Error && networkError.name === "AbortError") {
+      console.error("⏱️ Heartbeat request timed out");
+    }
   }
 }
 
