@@ -15,7 +15,7 @@ import {
   safelyTerminateInstance,
   tagInstance,
   updateASGCapacity,
-} from "./aws";
+} from "./awsUtils";
 import {
   addToWarmPool,
   getActiveUserCount,
@@ -23,62 +23,76 @@ import {
   getWarmPoolSize,
   popWarmSpare,
   setUserWorkspace,
-} from "./redis";
+} from "./redisUtils";
+import logger from "./logger";
 
-export async function ensureCapacity(): Promise<void> {
-  console.log(`🔧 [MachineManager] Ensuring adequate capacity`);
+export async function ensureCapacity(requestId: string): Promise<void> {
+  const functionName = "ensureCapacity";
+  logger.debug(
+    `[${requestId || "system"}] [${functionName}] Ensuring adequate capacity`
+  );
+
   try {
-    const activeUsers = await getActiveUserCount();
+    const activeUsers = await getActiveUserCount(requestId);
     const desired = Math.min(activeUsers + WARM_SPARE_COUNT, MAX_MACHINES);
-    const current = await getCurrentASGCapacity();
-
-    console.log(`📊 [MachineManager] Capacity analysis:`, {
-      activeUsers,
-      warmSpareTarget: WARM_SPARE_COUNT,
-      maxMachines: MAX_MACHINES,
-      currentCapacity: current,
-      desiredCapacity: desired,
-    });
+    const current = await getCurrentASGCapacity(requestId);
 
     if (desired > current) {
-      console.log(`📈 [MachineManager] Scaling up: ${current} → ${desired}`);
-      await updateASGCapacity(desired);
-      console.log(
-        `✅ [MachineManager] ASG capacity updated: ${current} → ${desired}`
+      logger.info(
+        `[${requestId || "system"}] [${functionName}] Scaling up capacity`,
+        {
+          currentCapacity: current,
+          desiredCapacity: desired,
+          activeUsers,
+          warmSpareCount: WARM_SPARE_COUNT,
+        }
       );
+      await updateASGCapacity(desired, requestId);
     } else {
-      console.log(
-        `✅ [MachineManager] Capacity is adequate (${current}/${desired})`
+      logger.debug(
+        `[${requestId || "system"}] [${functionName}] Capacity is adequate`,
+        { currentCapacity: current, desiredCapacity: desired, activeUsers }
       );
     }
   } catch (error) {
-    console.error(`❌ [MachineManager] Failed to ensure capacity:`, error);
+    logger.error(
+      `[${requestId || "system"}] [${functionName}] Failed to ensure capacity`,
+      { error: error instanceof Error ? error.message : "Unknown error" }
+    );
     throw error;
   }
 }
 
 export async function allocateMachine(
-  userId: string
+  userId: string,
+  requestId: string
 ): Promise<SuccessResponse | ErrorResponse> {
-  console.log(
-    `🚀 [MachineManager] Starting machine allocation for user: ${userId}`
+  const functionName = "allocateMachine";
+  logger.info(
+    `[${requestId || "system"}] [${functionName}] Starting machine allocation`,
+    { userId }
   );
+
   let shouldRollback = false;
   let instanceId: string | null = null;
 
   try {
     const now = Date.now();
-
-    // Check for existing workspace
-    console.log(`🔍 [MachineManager] Checking for existing workspace`);
-    const existingWorkspace = await getUserWorkspace(userId);
+    const existingWorkspace = await getUserWorkspace(userId, requestId);
 
     if (
       existingWorkspace?.state === INSTANCE_STATE.RUNNING &&
       existingWorkspace?.publicIp
     ) {
-      console.log(
-        `✅ [MachineManager] User ${userId} already has running machine: ${existingWorkspace.instanceId}`
+      logger.info(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Machine already allocated for user`,
+        {
+          userId,
+          instanceId: existingWorkspace.instanceId,
+          publicIp: existingWorkspace.publicIp,
+        }
       );
       return {
         success: true,
@@ -91,17 +105,15 @@ export async function allocateMachine(
       };
     }
 
-    // Try to get a warm spare
-    console.log(`🎯 [MachineManager] Attempting to get warm spare`);
-    instanceId = await popWarmSpare();
-
+    instanceId = await popWarmSpare(requestId);
     if (!instanceId) {
-      console.warn(
-        `⚠️  [MachineManager] No warm spare available for user: ${userId}`
+      logger.warn(
+        `[${
+          requestId || "system"
+        }] [${functionName}] No warm spare available, ensuring capacity`,
+        { userId }
       );
-      console.log(`🔧 [MachineManager] Triggering capacity increase`);
-      // Trigger capacity increase and ask user to retry
-      await ensureCapacity();
+      await ensureCapacity(requestId);
       return {
         success: false,
         message: "No available machines. Please try again in a moment.",
@@ -110,33 +122,21 @@ export async function allocateMachine(
       };
     }
 
-    console.log(`✅ [MachineManager] Got warm spare: ${instanceId}`);
-    console.log(`🔍 [MachineManager] Getting public IP for instance`);
-    const publicIp = await getInstanceIP(instanceId);
-
+    const publicIp = await getInstanceIP(instanceId, requestId);
     if (!publicIp) {
-      console.error(
-        `❌ [MachineManager] Failed to retrieve public IP for instance ${instanceId}`
+      logger.error(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Instance has no public IP`,
+        { userId, instanceId }
       );
       throw new Error("Instance has no public IP and was terminated");
     }
 
-    console.log(`✅ [MachineManager] Got public IP: ${publicIp}`);
-
-    // From here, if anything fails, we need to rollback
-
     shouldRollback = true;
+    await tagInstance(instanceId, userId, requestId);
+    await protectActiveInstances([instanceId], requestId);
 
-    // Tag instance as owned by user
-    console.log(`🏷️  [MachineManager] Tagging instance as owned by user`);
-    await tagInstance(instanceId, userId);
-
-    // Protect instance from ASG scale-in
-    console.log(`🛡️  [MachineManager] Protecting instance from scale-in`);
-    await protectActiveInstances([instanceId]);
-
-    // Store allocation in Redis
-    console.log(`💾 [MachineManager] Storing allocation in Redis`);
     const workspace: WorkspaceInfo = {
       instanceId,
       publicIp,
@@ -145,18 +145,15 @@ export async function allocateMachine(
       ts: now.toString(),
     };
 
-    await setUserWorkspace(userId, workspace);
+    await setUserWorkspace(userId, workspace, requestId);
+    await ensureCapacity(requestId);
 
-    // Ensure we maintain adequate capacity
-    console.log(
-      `🔧 [MachineManager] Ensuring adequate capacity after allocation`
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Successfully allocated machine`,
+      { userId, instanceId, publicIp }
     );
-    await ensureCapacity();
-
-    console.log(
-      `🎉 [MachineManager] Successfully allocated machine ${instanceId} to user ${userId}`
-    );
-
     return {
       success: true,
       message: "Machine allocated successfully",
@@ -164,36 +161,57 @@ export async function allocateMachine(
       data: { instanceId, publicUrl: publicIp },
     };
   } catch (error) {
-    console.error(
-      `❌ [MachineManager] Allocation failed for user ${userId}:`,
-      error
+    logger.error(
+      `[${requestId || "system"}] [${functionName}] Machine allocation failed`,
+      {
+        userId,
+        instanceId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
     );
 
-    // Simple rollback: only if instance passed IP validation
     if (instanceId && shouldRollback) {
-      console.log(`🔄 [MachineManager] Rolling back instance ${instanceId}`);
-
-      // Remove protection (ignore errors)
+      logger.debug(
+        `[${requestId || "system"}] [${functionName}] Rolling back allocation`,
+        { userId, instanceId }
+      );
       try {
-        await removeInstanceProtection([instanceId]);
+        await removeInstanceProtection([instanceId], requestId);
       } catch (e) {
-        console.warn(`Failed to remove protection: ${e}`);
+        logger.error(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Failed to remove protection during rollback`,
+          {
+            instanceId,
+            error: e instanceof Error ? e.message : "Unknown error",
+          }
+        );
       }
-
-      // Re-tag as unassigned (ignore errors)
       try {
-        await tagInstance(instanceId, "UNASSIGNED");
+        await tagInstance(instanceId, "UNASSIGNED", requestId);
       } catch (e) {
-        console.warn(`Failed to re-tag: ${e}`);
+        logger.error(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Failed to retag instance during rollback`,
+          {
+            instanceId,
+            error: e instanceof Error ? e.message : "Unknown error",
+          }
+        );
       }
-
-      // Return to warm pool (most important step)
       try {
-        await addToWarmPool(instanceId);
-        console.log(`✅ [MachineManager] Returned ${instanceId} to warm pool`);
+        await addToWarmPool(instanceId, requestId);
       } catch (e) {
-        console.error(
-          `CRITICAL: Failed to return ${instanceId} to warm pool: ${e}`
+        logger.error(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Failed to return instance to warm pool during rollback`,
+          {
+            instanceId,
+            error: e instanceof Error ? e.message : "Unknown error",
+          }
         );
       }
     }
@@ -208,22 +226,25 @@ export async function allocateMachine(
   }
 }
 
-export async function getSystemStatus(): Promise<{
+export async function getSystemStatus(requestId: string): Promise<{
   activeUsers: number;
   warmSpares: number;
   totalInstances: number;
   asgCapacity: number;
   instanceDetails: any[];
 }> {
-  console.log(`📊 [MachineManager] Getting system status`);
+  const functionName = "getSystemStatus";
+  logger.debug(
+    `[${requestId || "system"}] [${functionName}] Getting system status`
+  );
+
   try {
-    console.log(`📡 [MachineManager] Fetching system metrics`);
     const [activeUsers, warmSpares, asgCapacity, instancesInfo] =
       await Promise.all([
-        getActiveUserCount(),
-        getWarmPoolSize(),
-        getCurrentASGCapacity(),
-        getASGInstancesInfo(),
+        getActiveUserCount(requestId),
+        getWarmPoolSize(requestId),
+        getCurrentASGCapacity(requestId),
+        getASGInstancesInfo(requestId),
       ]);
 
     const status = {
@@ -234,16 +255,23 @@ export async function getSystemStatus(): Promise<{
       instanceDetails: instancesInfo,
     };
 
-    console.log(`✅ [MachineManager] System status retrieved:`, {
-      activeUsers: status.activeUsers,
-      warmSpares: status.warmSpares,
-      totalInstances: status.totalInstances,
-      asgCapacity: status.asgCapacity,
-    });
-
+    logger.info(
+      `[${requestId || "system"}] [${functionName}] Retrieved system status`,
+      {
+        activeUsers,
+        warmSpares,
+        totalInstances: instancesInfo.length,
+        asgCapacity,
+      }
+    );
     return status;
   } catch (error) {
-    console.error(`❌ [MachineManager] Failed to get system status:`, error);
+    logger.error(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Failed to get system status`,
+      { error: error instanceof Error ? error.message : "Unknown error" }
+    );
     throw error;
   }
 }

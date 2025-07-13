@@ -1,4 +1,3 @@
-import e from "cors";
 import { CleanupResult } from "../types";
 import {
   getASGInstancesInfo,
@@ -6,7 +5,7 @@ import {
   protectActiveInstances,
   safelyTerminateInstance,
   updateASGCapacity,
-} from "./aws";
+} from "./awsUtils";
 import {
   cleanupUserData,
   getActiveUserCount,
@@ -14,11 +13,18 @@ import {
   getUserWorkspace,
   getWarmPoolSize,
   removeFromWarmPool,
-} from "./redis";
+} from "./redisUtils";
 import { WARM_SPARE_COUNT } from "../config/awsConfig";
+import logger from "./logger";
 
-export async function cleanupIdleMachines(): Promise<CleanupResult> {
-  console.log(`🧹 [CleanupManager] Starting idle machine cleanup`);
+export async function cleanupIdleMachines(
+  requestId: string
+): Promise<CleanupResult> {
+  const functionName = "cleanupIdleMachines";
+  logger.info(
+    `[${requestId || "system"}] [${functionName}] Starting idle machine cleanup`
+  );
+
   const result: CleanupResult = {
     terminatedInstances: [],
     cleanedUsers: [],
@@ -26,138 +32,234 @@ export async function cleanupIdleMachines(): Promise<CleanupResult> {
   };
 
   try {
-    console.log(`🔍 [CleanupManager] Getting idle users from Redis`);
-    // Get idle users from Redis
-    const idleUsers = await getIdleUsers();
+    const idleUsers = await getIdleUsers(requestId);
 
     if (idleUsers.length === 0) {
-      console.log(`✅ [CleanupManager] No idle users found - cleanup complete`);
+      logger.debug(
+        `[${requestId || "system"}] [${functionName}] No idle users found`
+      );
       return result;
     }
 
-    console.log(
-      `📊 [CleanupManager] Found ${
-        idleUsers.length
-      } idle users: ${idleUsers.join(", ")}`
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Found idle users to cleanup`,
+      { idleUserCount: idleUsers.length }
     );
 
-    // Process each idle user
     for (const userId of idleUsers) {
-      console.log(`🔄 [CleanupManager] Processing idle user: ${userId}`);
       try {
-        const workspace = await getUserWorkspace(userId);
+        logger.debug(
+          `[${requestId || "system"}] [${functionName}] Processing idle user`,
+          { userId }
+        );
 
+        const workspace = await getUserWorkspace(userId, requestId);
         if (!workspace || !workspace.instanceId) {
-          console.warn(
-            `⚠️  [CleanupManager] No workspace found for idle user: ${userId}`
+          logger.debug(
+            `[${
+              requestId || "system"
+            }] [${functionName}] No workspace or instance found for user`,
+            { userId }
           );
           continue;
         }
 
         const instanceId = workspace.instanceId;
-        console.log(
-          `🔴 [CleanupManager] Terminating instance ${instanceId} for idle user ${userId}`
-        );
 
-        // Remove from warm pool if it's there
-        console.log(`🗑️  [CleanupManager] Removing from warm pool`);
-        await removeFromWarmPool(instanceId);
-
-        // Safely terminate the instance (decrements ASG capacity)
-        console.log(`💥 [CleanupManager] Safely terminating instance`);
-        await safelyTerminateInstance(instanceId);
-
-        // Clean up Redis data
-        console.log(`🧹 [CleanupManager] Cleaning up Redis data`);
-        await cleanupUserData(userId, instanceId);
+        await removeFromWarmPool(instanceId, requestId);
+        await safelyTerminateInstance(instanceId, requestId);
+        await cleanupUserData(userId, instanceId, requestId);
 
         result.terminatedInstances.push(instanceId);
         result.cleanedUsers.push(userId);
 
-        console.log(
-          `✅ [CleanupManager] Successfully cleaned up user ${userId}, instance ${instanceId}`
+        logger.info(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Successfully cleaned up idle user`,
+          { userId, instanceId }
         );
       } catch (error) {
         const errorMsg = `Failed to cleanup user ${userId}: ${
           error instanceof Error ? error.message : "Unknown error"
         }`;
-        console.error(errorMsg);
+        logger.error(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Failed to cleanup idle user`,
+          {
+            userId,
+            error: error instanceof Error ? error.message : "Unknown error",
+          }
+        );
         result.errors.push(errorMsg);
       }
     }
 
-    console.log(
-      `Cleanup completed. Terminated: ${result.terminatedInstances.length}, Cleaned: ${result.cleanedUsers.length}, Errors: ${result.errors.length}`
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Idle machine cleanup completed`,
+      {
+        terminatedInstances: result.terminatedInstances.length,
+        cleanedUsers: result.cleanedUsers.length,
+        errors: result.errors.length,
+      }
     );
   } catch (error) {
     const errorMsg = `Cleanup process failed: ${
       error instanceof Error ? error.message : "Unknown error"
     }`;
-    console.error(errorMsg);
+    logger.error(
+      `[${requestId || "system"}] [${functionName}] Cleanup process failed`,
+      { error: error instanceof Error ? error.message : "Unknown error" }
+    );
     result.errors.push(errorMsg);
   }
 
   return result;
 }
 
-export async function safeScaleDown(targetCapacity: number): Promise<void> {
-  try {
-    console.log(`Starting safe scale down to ${targetCapacity}...`);
+export async function safeScaleDown(
+  targetCapacity: number,
+  requestId: string
+): Promise<void> {
+  const functionName = "safeScaleDown";
+  logger.debug(
+    `[${requestId || "system"}] [${functionName}] Starting safe scale down`,
+    { targetCapacity }
+  );
 
-    const currentCapacity = await getCurrentASGCapacity();
+  try {
+    const currentCapacity = await getCurrentASGCapacity(requestId);
 
     if (targetCapacity >= currentCapacity) {
-      console.log("No scale down needed");
+      logger.debug(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Target capacity is not less than current, no scaling needed`,
+        { currentCapacity, targetCapacity }
+      );
       return;
     }
 
     // Get all instances and identify active ones
-    const instancesInfo = await getASGInstancesInfo();
+    const instancesInfo = await getASGInstancesInfo(requestId);
     const activeInstances = instancesInfo
       .filter((instance) => instance.isActive)
       .map((instance) => instance.instanceId);
 
+    logger.debug(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Protecting active instances before scale down`,
+      {
+        activeInstanceCount: activeInstances.length,
+        targetCapacity,
+        currentCapacity,
+      }
+    );
+
     // Protect active instances
     if (activeInstances.length > 0) {
-      await protectActiveInstances(activeInstances);
-      console.log(`Protected ${activeInstances.length} active instances`);
+      await protectActiveInstances(activeInstances, requestId);
     }
 
     // Scale down - ASG will only terminate unprotected instances
-    await updateASGCapacity(targetCapacity);
+    await updateASGCapacity(targetCapacity, requestId);
 
-    console.log(`Scaled down from ${currentCapacity} to ${targetCapacity}`);
+    logger.info(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Successfully scaled down capacity`,
+      {
+        currentCapacity,
+        targetCapacity,
+        protectedInstances: activeInstances.length,
+      }
+    );
   } catch (error) {
-    console.error("Failed to scale down safely:", error);
+    logger.error(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Failed to scale down safely`,
+      {
+        targetCapacity,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    );
     throw error;
   }
 }
 
-export async function ensureOptimalWarmSpares(): Promise<void> {
+export async function ensureOptimalWarmSpares(
+  requestId: string
+): Promise<void> {
+  const functionName = "ensureOptimalWarmSpares";
+  logger.debug(
+    `[${
+      requestId || "system"
+    }] [${functionName}] Ensuring optimal warm spare count`
+  );
+
   try {
-    const activeUsers = await getActiveUserCount();
-    const warmPoolSize = await getWarmPoolSize();
-    const currentCapacity = await getCurrentASGCapacity();
+    const activeUsers = await getActiveUserCount(requestId);
+    const warmPoolSize = await getWarmPoolSize(requestId);
+    const currentCapacity = await getCurrentASGCapacity(requestId);
     const targetCapacity = activeUsers + WARM_SPARE_COUNT;
 
-    console.log(
-      `Capacity check - Active: ${activeUsers}, Warm: ${warmPoolSize}, Current: ${currentCapacity}, Target: ${targetCapacity}`
+    logger.debug(
+      `[${requestId || "system"}] [${functionName}] Current system state`,
+      {
+        activeUsers,
+        warmPoolSize,
+        currentCapacity,
+        targetCapacity,
+        warmSpareCount: WARM_SPARE_COUNT,
+      }
     );
 
     if (currentCapacity < targetCapacity) {
       // Scale up
-      await updateASGCapacity(targetCapacity);
-      console.log(`Scaled up to ${targetCapacity}`);
+      logger.info(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Scaling up to meet demand`,
+        { currentCapacity, targetCapacity }
+      );
+      await updateASGCapacity(targetCapacity, requestId);
     } else if (
       currentCapacity > targetCapacity &&
       warmPoolSize > WARM_SPARE_COUNT
     ) {
       // Too many warm spares, scale down safely
-      await safeScaleDown(targetCapacity);
-      console.log(`Scaled down to ${targetCapacity}`);
+      logger.info(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Too many warm spares, scaling down`,
+        {
+          currentCapacity,
+          targetCapacity,
+          warmPoolSize,
+          warmSpareCount: WARM_SPARE_COUNT,
+        }
+      );
+      await safeScaleDown(targetCapacity, requestId);
+    } else {
+      logger.debug(
+        `[${requestId || "system"}] [${functionName}] Capacity is optimal`,
+        { currentCapacity, targetCapacity, warmPoolSize }
+      );
     }
   } catch (error) {
-    console.error("Failed to ensure optimal warm spares:", error);
+    logger.error(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Failed to ensure optimal warm spares`,
+      { error: error instanceof Error ? error.message : "Unknown error" }
+    );
     throw error;
   }
 }
@@ -166,17 +268,34 @@ export async function ensureOptimalWarmSpares(): Promise<void> {
  * Start periodic cleanup process
  */
 export function startCleanupProcess(): NodeJS.Timeout {
-  console.log("Starting periodic cleanup process...");
+  const functionName = "startCleanupProcess";
+  logger.info(`[system] [${functionName}] Starting periodic cleanup process`);
 
   const cleanupInterval = setInterval(async () => {
+    const requestId = `cleanup-${Date.now()}`;
     try {
+      logger.debug(
+        `[${requestId}] [${functionName}] Running periodic cleanup cycle`
+      );
+
       // Clean up idle machines
-      await cleanupIdleMachines();
+      const cleanupResult = await cleanupIdleMachines(requestId);
 
       // Ensure optimal capacity
-      await ensureOptimalWarmSpares();
+      await ensureOptimalWarmSpares(requestId);
+
+      logger.info(
+        `[${requestId}] [${functionName}] Periodic cleanup cycle completed`,
+        {
+          terminatedInstances: cleanupResult.terminatedInstances.length,
+          cleanedUsers: cleanupResult.cleanedUsers.length,
+          errors: cleanupResult.errors.length,
+        }
+      );
     } catch (error) {
-      console.error("Periodic cleanup error:", error);
+      logger.error(`[${requestId}] [${functionName}] Periodic cleanup error`, {
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   }, 60000); // Run every minute
 
@@ -187,6 +306,7 @@ export function startCleanupProcess(): NodeJS.Timeout {
  * Stop cleanup process
  */
 export function stopCleanupProcess(interval: NodeJS.Timeout): void {
+  const functionName = "stopCleanupProcess";
   clearInterval(interval);
-  console.log("Stopped cleanup process");
+  logger.info(`[system] [${functionName}] Stopped cleanup process`);
 }

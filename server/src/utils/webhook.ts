@@ -2,8 +2,9 @@ import { Request, Response } from "express";
 
 import { DescribeInstancesCommand } from "@aws-sdk/client-ec2";
 import { ec2Client } from "../config/awsConfig";
-import { tagInstance } from "./aws";
-import { addToWarmPool } from "./redis";
+import { tagInstance } from "./awsUtils";
+import { addToWarmPool } from "./redisUtils";
+import logger from "./logger";
 
 interface SNSMessage {
   Type: string;
@@ -48,29 +49,31 @@ interface InstanceReadinessCheck {
   isRunning: boolean;
 }
 
-/**
- * Verify SNS message signature (optional but recommended for production)
- */
 function verifySNSSignature(message: SNSMessage): boolean {
-  // Implementation depends on your security requirements
-  // For now, return true (implement proper verification in production)
   return true;
 }
 
-/**
- * Check if instance is ready for use
- */
 async function checkInstanceReadiness(
-  instanceId: string
+  instanceId: string,
+  requestId: string
 ): Promise<InstanceReadinessCheck> {
+  const functionName = "checkInstanceReadiness";
+  logger.debug(
+    `[${requestId || "system"}] [${functionName}] Checking instance readiness`,
+    { instanceId }
+  );
+
   try {
     const response = await ec2Client.send(
       new DescribeInstancesCommand({ InstanceIds: [instanceId] })
     );
-
     const instance = response.Reservations?.[0]?.Instances?.[0];
 
     if (!instance) {
+      logger.warn(
+        `[${requestId || "system"}] [${functionName}] Instance not found`,
+        { instanceId }
+      );
       return {
         hasPublicIp: false,
         isRunning: false,
@@ -80,9 +83,30 @@ async function checkInstanceReadiness(
     const hasPublicIp = !!instance.PublicIpAddress;
     const isRunning = instance.State?.Name === "running";
 
+    logger.debug(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Instance readiness check completed`,
+      {
+        instanceId,
+        hasPublicIp,
+        isRunning,
+        state: instance.State?.Name,
+        publicIp: instance.PublicIpAddress,
+      }
+    );
+
     return { hasPublicIp, isRunning };
   } catch (error) {
-    console.error(`Failed to check instance ${instanceId} readiness:`, error);
+    logger.error(
+      `[${
+        requestId || "system"
+      }] [${functionName}] Failed to check instance readiness`,
+      {
+        instanceId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    );
     return {
       hasPublicIp: false,
       isRunning: false,
@@ -90,203 +114,269 @@ async function checkInstanceReadiness(
   }
 }
 
-/**
- * Process new instance with retry logic
- */
 async function processNewInstanceWithRetries(
   instanceId: string,
-  maxAttempts: number = 3
+  maxAttempts: number = 3,
+  requestId: string
 ): Promise<boolean> {
-  console.log(
-    `Processing new instance ${instanceId} with ${maxAttempts} attempts...`
+  const functionName = "processNewInstanceWithRetries";
+  logger.info(
+    `[${requestId || "system"}] [${functionName}] Processing new instance`,
+    { instanceId, maxAttempts }
   );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`Attempt ${attempt}/${maxAttempts} for instance ${instanceId}`);
-
     try {
-      const readiness = await checkInstanceReadiness(instanceId);
+      logger.debug(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Attempt ${attempt} of ${maxAttempts}`,
+        { instanceId, attempt }
+      );
 
-      console.log(`Instance ${instanceId} readiness check:`, readiness);
+      const readiness = await checkInstanceReadiness(instanceId, requestId);
 
-      // Minimum requirements: running and has public IP
       if (readiness.isRunning && readiness.hasPublicIp) {
-        console.log(
-          `Instance ${instanceId} meets minimum requirements, adding to warm pool`
+        await tagInstance(instanceId, "UNASSIGNED", requestId);
+        await addToWarmPool(instanceId, requestId);
+
+        logger.info(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Successfully processed new instance`,
+          { instanceId, attempt }
         );
-
-        // Tag as unassigned warm spare
-        await tagInstance(instanceId, "UNASSIGNED");
-
-        // Add to warm pool
-        await addToWarmPool(instanceId);
-
-        console.log(`Successfully added instance ${instanceId} to warm pool`);
         return true;
       }
 
-      // Log what's missing
-      const missing = [];
-      if (!readiness.isRunning) missing.push("not running");
-      if (!readiness.hasPublicIp) missing.push("no public IP");
-
-      console.log(`Instance ${instanceId} not ready: ${missing.join(", ")}`);
-
-      // Wait before retry (except on last attempt)
       if (attempt < maxAttempts) {
-        const waitTime = 60000; // 1 minute
-        console.log(`Waiting ${waitTime / 1000} seconds before retry...`);
+        const waitTime = 60000;
+        logger.debug(
+          `[${
+            requestId || "system"
+          }] [${functionName}] Instance not ready, waiting before retry`,
+          {
+            instanceId,
+            attempt,
+            waitTime,
+            hasPublicIp: readiness.hasPublicIp,
+            isRunning: readiness.isRunning,
+          }
+        );
         await new Promise((resolve) => setTimeout(resolve, waitTime));
       }
     } catch (error) {
-      console.error(
-        `Error checking instance ${instanceId} on attempt ${attempt}:`,
-        error
+      logger.error(
+        `[${
+          requestId || "system"
+        }] [${functionName}] Error processing instance on attempt ${attempt}`,
+        {
+          instanceId,
+          attempt,
+          error: error instanceof Error ? error.message : "Unknown error",
+        }
       );
 
       if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 30000)); // Wait 30s on error
+        await new Promise((resolve) => setTimeout(resolve, 30000));
       }
     }
   }
 
-  console.error(
-    `Failed to process instance ${instanceId} after ${maxAttempts} attempts`
+  logger.error(
+    `[${
+      requestId || "system"
+    }] [${functionName}] Failed to process new instance after all attempts`,
+    { instanceId, maxAttempts }
   );
   return false;
 }
 
-/**
- * Handle ASG lifecycle events
- */
 async function handleASGLifecycleEvent(
-  event: ASGLifecycleEvent
+  event: ASGLifecycleEvent,
+  requestId: string
 ): Promise<void> {
-  console.log("Received ASG lifecycle event:", event);
+  const functionName = "handleASGLifecycleEvent";
+  logger.debug(
+    `[${requestId || "system"}] [${functionName}] Handling ASG lifecycle event`,
+    {
+      event: event.Event,
+      instanceId: event.EC2InstanceId,
+      asgName: event.AutoScalingGroupName,
+    }
+  );
 
-  // Only process instance launch events
   if (event.Event !== "autoscaling:EC2_INSTANCE_LAUNCH") {
-    console.log(`Ignoring lifecycle transition: ${event.Event}`);
+    logger.debug(
+      `[${requestId || "system"}] [${functionName}] Ignoring non-launch event`,
+      {
+        event: event.Event,
+        instanceId: event.EC2InstanceId,
+      }
+    );
     return;
   }
 
   const instanceId = event.EC2InstanceId;
-  console.log(`Processing instance launch: ${instanceId}`);
+  logger.info(
+    `[${
+      requestId || "system"
+    }] [${functionName}] Processing instance launch event`,
+    { instanceId, asgName: event.AutoScalingGroupName }
+  );
 
-  // Process with retry logic (3 attempts over 3 minutes)
-  const success = await processNewInstanceWithRetries(instanceId, 3);
-
-  if (!success) {
-    console.error(
-      `Failed to add instance ${instanceId} to warm pool after all retries`
-    );
-    // Optionally: send alert, terminate instance, etc.
-  }
+  await processNewInstanceWithRetries(instanceId, 3, requestId);
 }
 
-/**
- * Main webhook endpoint
- */
 export async function webhookHandler(
   req: Request,
   res: Response
 ): Promise<void> {
+  const functionName = "webhookHandler";
+  const requestId = logger.getRequestId(req);
+
+  logger.debug(`[${requestId}] [${functionName}] Received webhook request`, {
+    messageType: req.body.Type,
+    messageId: req.body.MessageId,
+  });
+
   try {
-    console.log("Webhook received:", {
-      headers: req.headers,
-      body: req.body,
-    });
-
-    // Handle SNS subscription confirmation
     if (req.body.Type === "SubscriptionConfirmation") {
-      console.log("SNS subscription confirmation received");
-
       const data = req.body;
       const subscribeUrl = data.SubscribeURL;
 
       if (!subscribeUrl) {
-        console.error("❌ No SubscribeURL found in confirmation message");
+        logger.error(
+          `[${requestId}] [${functionName}] No SubscribeURL found in confirmation`,
+          { messageId: data.MessageId }
+        );
         res.status(400).json({ error: "No SubscribeURL found" });
         return;
       }
 
-      console.log(
-        "Please visit this URL to confirm subscription:",
-        req.body.SubscribeURL
+      logger.info(
+        `[${requestId}] [${functionName}] Subscription confirmation received`,
+        {
+          subscribeUrl,
+          messageId: data.MessageId,
+        }
       );
-
       res.status(200).json({ message: "Subscription confirmation received" });
       return;
     }
+
     if (req.body.Type === "Notification") {
       const snsMessage: SNSMessage = req.body;
 
-      // Optional: Verify SNS signature in production
       if (!verifySNSSignature(snsMessage)) {
-        console.error("Invalid SNS signature");
+        logger.error(`[${requestId}] [${functionName}] Invalid SNS signature`, {
+          messageId: snsMessage.MessageId,
+        });
         res.status(401).json({ error: "Invalid signature" });
         return;
       }
 
-      // Parse the actual message
       let lifecycleEvent: ASGLifecycleEvent;
       try {
         lifecycleEvent = JSON.parse(snsMessage.Message);
       } catch (error) {
-        console.error("Failed to parse SNS message:", error);
+        logger.error(
+          `[${requestId}] [${functionName}] Invalid message format`,
+          {
+            messageId: snsMessage.MessageId,
+            error: error instanceof Error ? error.message : "Unknown error",
+          }
+        );
         res.status(400).json({ error: "Invalid message format" });
         return;
       }
 
-      // Process the lifecycle event asynchronously
-      // Don't wait for completion to avoid timeouts
-      setImmediate(() => handleASGLifecycleEvent(lifecycleEvent));
+      logger.info(
+        `[${requestId}] [${functionName}] Processing SNS notification`,
+        {
+          messageId: snsMessage.MessageId,
+          event: lifecycleEvent.Event,
+          instanceId: lifecycleEvent.EC2InstanceId,
+        }
+      );
 
+      setImmediate(() => handleASGLifecycleEvent(lifecycleEvent, requestId));
       res.status(200).json({ message: "Event received and processing" });
       return;
     }
 
-    // Unknown message type
-    console.error("Unknown message type:", req.body.Type);
+    logger.warn(`[${requestId}] [${functionName}] Unknown message type`, {
+      messageType: req.body.Type,
+    });
     res.status(400).json({ error: "Unknown message type" });
   } catch (error) {
-    console.error("Webhook handler error:", error);
+    logger.error(`[${requestId}] [${functionName}] Webhook handler error`, {
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
     res.status(500).json({ error: "Internal server error" });
   }
 }
 
-/**
- * Manual endpoint to add instance to warm pool (for testing)
- */
 export async function manualAddToWarmPool(
   req: Request,
   res: Response
 ): Promise<void> {
+  const functionName = "manualAddToWarmPool";
+  const requestId = logger.getRequestId(req);
+
+  logger.debug(
+    `[${requestId}] [${functionName}] Manual warm pool addition requested`,
+    { body: req.body }
+  );
+
   try {
     const { instanceId } = req.body;
 
     if (!instanceId) {
+      logger.error(
+        `[${requestId}] [${functionName}] Missing instanceId in request`
+      );
       res.status(400).json({ error: "instanceId required" });
       return;
     }
 
-    console.log(`Manual request to add instance ${instanceId} to warm pool`);
+    logger.info(
+      `[${requestId}] [${functionName}] Processing manual warm pool addition`,
+      { instanceId }
+    );
 
-    const success = await processNewInstanceWithRetries(instanceId, 3);
+    const success = await processNewInstanceWithRetries(
+      instanceId,
+      3,
+      requestId
+    );
 
     if (success) {
+      logger.info(
+        `[${requestId}] [${functionName}] Successfully added instance to warm pool manually`,
+        { instanceId }
+      );
       res.status(200).json({
         message: `Instance ${instanceId} successfully added to warm pool`,
         success: true,
       });
     } else {
+      logger.error(
+        `[${requestId}] [${functionName}] Failed to add instance to warm pool manually`,
+        { instanceId }
+      );
       res.status(500).json({
         message: `Failed to add instance ${instanceId} to warm pool`,
         success: false,
       });
     }
   } catch (error) {
-    console.error("Manual add to warm pool error:", error);
+    logger.error(
+      `[${requestId}] [${functionName}] Manual warm pool addition error`,
+      {
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    );
     res.status(500).json({ error: "Internal server error" });
   }
 }
