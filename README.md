@@ -4,6 +4,16 @@
 
 A production-ready TypeScript application that dynamically manages EC2 instances for code-server workspaces using AWS Auto Scaling Groups, Redis state management, and Nginx reverse proxy for custom HTTPS domains.
 
+---
+
+> ⚠️ **NOTICE: Project In Progress & Temporarily Disabled**
+>
+> This project is currently **not live** due to infrastructure costs.
+> If you're interested in using or testing this system, feel free to **contact me at `vinayakvispute4@gmail.com`**.
+>
+---
+
+
 ## 🚀 **Features**
 
 ### **Core Functionality**
@@ -12,7 +22,7 @@ A production-ready TypeScript application that dynamically manages EC2 instances
 - ✅ **Warm Spare Management**: Maintains ready-to-use instances for fast allocation
 - ✅ **ASG-Aware Scaling**: Prevents unwanted instance replacements during cleanup
 - ✅ **Instance Protection**: Protects active user instances from scale-in events
-- ✅ **Custom HTTPS Domains**: Users get `https://username-abc123.workspaces.yourdomain.com`
+- ✅ **Custom HTTPS Domains**: Users get `https://username-abc123.workspaces.multi-coder-server.codeclause.tech`
 
 ### **Advanced Features**
 - 🔄 **Auto-Scaling Integration**: Dynamically adjusts capacity based on demand
@@ -83,7 +93,7 @@ A production-ready TypeScript application that dynamically manages EC2 instances
 ### **1. Clone and Install**
 
 ```bash
-git clone https://github.com/yourusername/code-server-manager.git
+git clone https://github.com/VinayakVispute/multi-user-code-server.git
 cd code-server-manager
 
 # Install dependencies
@@ -449,8 +459,6 @@ redis-cli ZRANGE ws:pings 0 -1 WITHSCORES
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🆘 **Support**
-
-- **Documentation**: [Full Documentation](docs/)
 - **Issues**: [GitHub Issues](https://github.com/yourusername/code-server-manager/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/yourusername/code-server-manager/discussions)
 
