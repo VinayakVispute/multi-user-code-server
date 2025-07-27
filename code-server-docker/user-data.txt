@@ -1,0 +1,53 @@
+#!/bin/bash
+set -e
+
+echo "🚀 Starting EC2 instance with EFS support..."
+
+# Configuration
+EFS_ID="fs-0581c1a21239632bf"   
+EFS_REGION="us-east-1"
+ROUTER_URL="https://multi-coder-server.codeclause.tech"
+
+# Mount EFS at boot
+echo "🔗 Setting up EFS mount..."
+sudo mkdir -p /mnt/efs
+echo "${EFS_ID}:/ /mnt/efs efs _netdev,tls 0 0" | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload
+sudo mount -a
+
+# Verify EFS is mounted
+if mountpoint -q /mnt/efs; then
+    echo "✅ EFS mounted successfully at /mnt/efs"
+else
+    echo "❌ Failed to mount EFS"
+    exit 1
+fi
+
+# Set proper permissions
+chown ubuntu:ubuntu /mnt/efs
+chmod 755 /mnt/efs
+
+# Create default warm spare workspace
+mkdir -p /tmp/warm-spare-workspace
+echo "🔥 This is a warm spare instance. Waiting for user assignment..." > /tmp/warm-spare-workspace/README.md
+
+# Wait for Docker
+while ! docker info &> /dev/null; do
+    sleep 2
+done
+
+# 🎯 Start container with warm spare workspace
+echo "🔥 Starting code-server container..."
+docker run -d \
+    --name code-server-warm \
+    --network=host \
+    --restart unless-stopped \
+    -v /mnt/efs:/mnt/efs \
+    -v /tmp/warm-spare-workspace:/tmp/custom-workspace \
+    -e ROUTER_URL="${ROUTER_URL}" \
+    code-server
+
+echo "✅ Warm spare instance ready"
+
+sudo systemctl reload nginx
+sudo nginx -s reload
