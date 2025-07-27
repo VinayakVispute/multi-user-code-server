@@ -21,6 +21,7 @@
   "dependencies": {
     "@aws-sdk/client-auto-scaling": "^3.835.0",
     "@aws-sdk/client-ec2": "^3.838.0",
+    "@aws-sdk/client-ssm": "^3.849.0",
     "@clerk/express": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",

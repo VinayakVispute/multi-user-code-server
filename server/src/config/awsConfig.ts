@@ -1,6 +1,7 @@
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { AutoScalingClient } from "@aws-sdk/client-auto-scaling";
 import type { AWSConfig } from "../types";
+import { SSMClient } from "@aws-sdk/client-ssm";
 
 export const awsConfig: AWSConfig = {
   region: process.env.AWS_REGION || "us-east-1",
@@ -12,7 +13,10 @@ export const awsConfig: AWSConfig = {
 
 // AWS Clients
 export const ec2Client = new EC2Client(awsConfig);
+
 export const autoScalingClient = new AutoScalingClient(awsConfig);
+
+export const ssmClient = new SSMClient(awsConfig);
 
 // Configuration constants
 export const MAX_MACHINES = Number(process.env.ASG_MAX) || 5;

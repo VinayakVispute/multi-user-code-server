@@ -14,8 +14,9 @@ import {
   getWarmPoolSize,
   removeFromWarmPool,
 } from "./redisUtils";
-import { WARM_SPARE_COUNT } from "../config/awsConfig";
+import { ssmClient, WARM_SPARE_COUNT } from "../config/awsConfig";
 import logger from "./logger";
+import { SendCommandCommand } from "@aws-sdk/client-ssm";
 
 export async function cleanupIdleMachines(
   requestId: string
@@ -42,8 +43,7 @@ export async function cleanupIdleMachines(
     }
 
     logger.info(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Found idle users to cleanup`,
       { idleUserCount: idleUsers.length }
     );
@@ -58,8 +58,7 @@ export async function cleanupIdleMachines(
         const workspace = await getUserWorkspace(userId, requestId);
         if (!workspace || !workspace.instanceId) {
           logger.debug(
-            `[${
-              requestId || "system"
+            `[${requestId || "system"
             }] [${functionName}] No workspace or instance found for user`,
             { userId }
           );
@@ -68,6 +67,7 @@ export async function cleanupIdleMachines(
 
         const instanceId = workspace.instanceId;
 
+        await resetToWarmSpare(instanceId);
         await removeFromWarmPool(instanceId, requestId);
         await safelyTerminateInstance(instanceId, requestId);
         await cleanupUserData(userId, instanceId, requestId);
@@ -76,18 +76,15 @@ export async function cleanupIdleMachines(
         result.cleanedUsers.push(userId);
 
         logger.info(
-          `[${
-            requestId || "system"
+          `[${requestId || "system"
           }] [${functionName}] Successfully cleaned up idle user`,
           { userId, instanceId }
         );
       } catch (error) {
-        const errorMsg = `Failed to cleanup user ${userId}: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`;
+        const errorMsg = `Failed to cleanup user ${userId}: ${error instanceof Error ? error.message : "Unknown error"
+          }`;
         logger.error(
-          `[${
-            requestId || "system"
+          `[${requestId || "system"
           }] [${functionName}] Failed to cleanup idle user`,
           {
             userId,
@@ -99,8 +96,7 @@ export async function cleanupIdleMachines(
     }
 
     logger.info(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Idle machine cleanup completed`,
       {
         terminatedInstances: result.terminatedInstances.length,
@@ -109,9 +105,8 @@ export async function cleanupIdleMachines(
       }
     );
   } catch (error) {
-    const errorMsg = `Cleanup process failed: ${
-      error instanceof Error ? error.message : "Unknown error"
-    }`;
+    const errorMsg = `Cleanup process failed: ${error instanceof Error ? error.message : "Unknown error"
+      }`;
     logger.error(
       `[${requestId || "system"}] [${functionName}] Cleanup process failed`,
       { error: error instanceof Error ? error.message : "Unknown error" }
@@ -137,8 +132,7 @@ export async function safeScaleDown(
 
     if (targetCapacity >= currentCapacity) {
       logger.debug(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] Target capacity is not less than current, no scaling needed`,
         { currentCapacity, targetCapacity }
       );
@@ -152,8 +146,7 @@ export async function safeScaleDown(
       .map((instance) => instance.instanceId);
 
     logger.debug(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Protecting active instances before scale down`,
       {
         activeInstanceCount: activeInstances.length,
@@ -171,8 +164,7 @@ export async function safeScaleDown(
     await updateASGCapacity(targetCapacity, requestId);
 
     logger.info(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Successfully scaled down capacity`,
       {
         currentCapacity,
@@ -182,8 +174,7 @@ export async function safeScaleDown(
     );
   } catch (error) {
     logger.error(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Failed to scale down safely`,
       {
         targetCapacity,
@@ -199,8 +190,7 @@ export async function ensureOptimalWarmSpares(
 ): Promise<void> {
   const functionName = "ensureOptimalWarmSpares";
   logger.debug(
-    `[${
-      requestId || "system"
+    `[${requestId || "system"
     }] [${functionName}] Ensuring optimal warm spare count`
   );
 
@@ -224,8 +214,7 @@ export async function ensureOptimalWarmSpares(
     if (currentCapacity < targetCapacity) {
       // Scale up
       logger.info(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] Scaling up to meet demand`,
         { currentCapacity, targetCapacity }
       );
@@ -236,8 +225,7 @@ export async function ensureOptimalWarmSpares(
     ) {
       // Too many warm spares, scale down safely
       logger.info(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] Too many warm spares, scaling down`,
         {
           currentCapacity,
@@ -255,8 +243,7 @@ export async function ensureOptimalWarmSpares(
     }
   } catch (error) {
     logger.error(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Failed to ensure optimal warm spares`,
       { error: error instanceof Error ? error.message : "Unknown error" }
     );
@@ -309,4 +296,40 @@ export function stopCleanupProcess(interval: NodeJS.Timeout): void {
   const functionName = "stopCleanupProcess";
   clearInterval(interval);
   logger.info(`[system] [${functionName}] Stopped cleanup process`);
+}
+
+
+/**
+ * Reset container back to warm spare mode
+ */
+async function resetToWarmSpare(instanceId: string): Promise<void> {
+  const resetScript = `#!/bin/bash
+CONTAINER_ID=\$(docker ps --filter "name=code-server-" --format "{{.ID}}")
+
+if [ -n "\$CONTAINER_ID" ]; then
+    sudo docker exec -u root \$CONTAINER_ID bash -c "
+        # Remove user symlink
+        sudo rm -rf /tmp/custom-workspace
+        
+        # Recreate warm spare workspace
+        sudo mkdir -p /tmp/custom-workspace
+        echo '🔥 This is a warm spare instance. Waiting for user assignment...' > /tmp/custom-workspace/README.md
+    "
+    
+    echo "✅ Reset to warm spare mode"
+fi
+`;
+
+  try {
+    const command = new SendCommandCommand({
+      InstanceIds: [instanceId],
+      DocumentName: "AWS-RunShellScript",
+      Parameters: { commands: [resetScript] },
+      TimeoutSeconds: 30
+    });
+
+    await ssmClient.send(command);
+  } catch (error) {
+    console.error(`Failed to reset to warm spare:`, error);
+  }
 }
