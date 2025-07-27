@@ -424,7 +424,7 @@ if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
     # Create workspace directories
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/workspace/{projects,temp,bin}
     
-    # 🆕 CREATE VS CODE DIRECTORIES
+    # CREATE VS CODE DIRECTORIES
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.vscode-server/{data/User,extensions}
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.vscode-server/data/User/{snippets,workspaceStorage}
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.config/code-server
@@ -456,7 +456,7 @@ EOF
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}/workspace/projects/hello-world"
     sudo -u "#1000" echo "console.log('Hello from ${userId}!');" > "\${EFS_USER_DIR}/workspace/projects/hello-world/index.js"
     
-    # 🆕 CREATE DEFAULT VS CODE SETTINGS
+    # CREATE DEFAULT VS CODE SETTINGS
     sudo -u "#1000" cat > "\${EFS_USER_DIR}/.vscode-server/data/User/settings.json" << 'SETTINGS_EOF'
 {
   "workbench.colorTheme": "Default Dark+",
@@ -474,7 +474,7 @@ EOF
 }
 SETTINGS_EOF
 
-    # 🆕 CREATE DEFAULT KEYBINDINGS
+    # CREATE DEFAULT KEYBINDINGS
     sudo -u "#1000" cat > "\${EFS_USER_DIR}/.vscode-server/data/User/keybindings.json" << 'KEYBINDINGS_EOF'
 [
   {
@@ -482,7 +482,7 @@ SETTINGS_EOF
     "command": "workbench.action.terminal.new"
   },
   {
-    "key": "ctrl+shift+e",
+    "key": "ctrl+shift+e", 
     "command": "workbench.view.explorer"
   }
 ]
@@ -505,25 +505,42 @@ fi
 
 echo "✅ Found container: \$CONTAINER_ID"
 
-# 🔄 RESTART CONTAINER WITH VS CODE PERSISTENCE
+# RESTART CONTAINER WITH VS CODE PERSISTENCE
 echo "🔄 Restarting container with persistent VS Code data..."
 
-# Get current container info
+# Get current container info - FIXED docker inspect commands
 CONTAINER_NAME=\$(docker inspect --format='{{.Name}}' \$CONTAINER_ID | sed 's/^\\///')
 CONTAINER_IMAGE=\$(docker inspect --format='{{.Config.Image}}' \$CONTAINER_ID)
-ROUTER_URL=\$(docker inspect --format='{{range .Config.Env}}{{if contains . "ROUTER_URL"}}{{.}}{{end}}{{end}}' \$CONTAINER_ID | cut -d'=' -f2)
+
+# 🔧 FIXED: Get ROUTER_URL properly
+ROUTER_URL=""
+for env_var in \$(docker inspect --format='{{range .Config.Env}}{{.}} {{end}}' \$CONTAINER_ID); do
+    if [[ "\$env_var" == ROUTER_URL=* ]]; then
+        ROUTER_URL=\$(echo "\$env_var" | cut -d'=' -f2-)
+        break
+    fi
+done
 
 echo "Container info: \$CONTAINER_NAME, Image: \$CONTAINER_IMAGE"
+echo "Router URL: \$ROUTER_URL"
 
 # Stop current container
 echo "🛑 Stopping current container..."
 docker stop \$CONTAINER_ID
 docker rm \$CONTAINER_ID
 
-# 🆕 START NEW CONTAINER WITH VS CODE PERSISTENCE
+# Verify EFS directories exist before mounting
+echo "🔍 Verifying EFS directories..."
+ls -la "\${EFS_USER_DIR}/" || echo "Cannot list EFS user directory"
+ls -la "\${EFS_USER_DIR}/workspace/" || echo "Workspace directory missing"
+ls -la "\${EFS_USER_DIR}/.vscode-server/" || echo "VS Code directory missing"
+
+# START NEW CONTAINER WITH VS CODE PERSISTENCE
 echo "🚀 Starting container with persistent workspace and VS Code data..."
-docker run -d \\
-    --name \$CONTAINER_NAME \\
+
+# 🔧 FIXED: Add error checking and better command structure
+if docker run -d \\
+    --name "\$CONTAINER_NAME" \\
     --network=host \\
     --restart unless-stopped \\
     -v /mnt/efs:/mnt/efs \\
@@ -532,48 +549,82 @@ docker run -d \\
     -v "\${EFS_USER_DIR}/.config:/home/coder/.config" \\
     -v "\${EFS_USER_DIR}/.local:/home/coder/.local" \\
     -e ROUTER_URL="\$ROUTER_URL" \\
-    \$CONTAINER_IMAGE
+    "\$CONTAINER_IMAGE"; then
+    echo "✅ Container started successfully"
+else
+    echo "❌ Failed to start container"
+    exit 1
+fi
 
 # Wait for container to start
-sleep 5
+echo "⏳ Waiting for container to initialize..."
+sleep 10
 
 # Verify new container
 NEW_CONTAINER_ID=\$(docker ps --filter "name=\$CONTAINER_NAME" --format "{{.ID}}")
 if [ -n "\$NEW_CONTAINER_ID" ]; then
-    echo "✅ New container started: \$NEW_CONTAINER_ID"
+    echo "✅ New container running: \$NEW_CONTAINER_ID"
     
-    # Test workspace access
-    echo "🔍 Testing workspace access..."
-    if docker exec \$NEW_CONTAINER_ID ls \${CONTAINER_WORKSPACE}/README.md >/dev/null 2>&1; then
-        echo "✅ Workspace accessible"
+    # More detailed testing
+    echo "🔍 Testing container mounts..."
+    
+    # Test 1: Check if workspace directory exists in container
+    if docker exec "\$NEW_CONTAINER_ID" ls "\${CONTAINER_WORKSPACE}" >/dev/null 2>&1; then
+        echo "✅ Workspace directory accessible"
         
-        # Test VS Code data access
-        if docker exec \$NEW_CONTAINER_ID ls /home/coder/.vscode-server/data/User/settings.json >/dev/null 2>&1; then
-            echo "✅ VS Code settings accessible"
+        # Test 2: Check if README exists
+        if docker exec "\$NEW_CONTAINER_ID" ls "\${CONTAINER_WORKSPACE}/README.md" >/dev/null 2>&1; then
+            echo "✅ Workspace content accessible"
         else
-            echo "⚠️  VS Code settings not found (will be created by code-server)"
+            echo "⚠️  README.md not found in workspace"
+            echo "📂 Workspace contents:"
+            docker exec "\$NEW_CONTAINER_ID" ls -la "\${CONTAINER_WORKSPACE}/" || echo "Cannot list workspace"
         fi
         
-        # Test write permissions
-        if docker exec \$NEW_CONTAINER_ID touch \${CONTAINER_WORKSPACE}/test-write 2>/dev/null; then
+        # Test 3: Check VS Code directories
+        if docker exec "\$NEW_CONTAINER_ID" ls "/home/coder/.vscode-server" >/dev/null 2>&1; then
+            echo "✅ VS Code server directory accessible"
+        else
+            echo "⚠️  VS Code server directory not accessible"
+        fi
+        
+        # Test 4: Write permissions
+        if docker exec "\$NEW_CONTAINER_ID" touch "\${CONTAINER_WORKSPACE}/test-write" 2>/dev/null; then
             echo "✅ Write permissions OK"
-            docker exec \$NEW_CONTAINER_ID rm -f \${CONTAINER_WORKSPACE}/test-write
+            docker exec "\$NEW_CONTAINER_ID" rm -f "\${CONTAINER_WORKSPACE}/test-write"
         else
-            echo "⚠️  Write permissions issue, fixing..."
+            echo "❌ Write permissions failed"
+            echo "🔧 Fixing permissions..."
             sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
-            echo "✅ Permissions fixed"
+            
+            # Test write again
+            if docker exec "\$NEW_CONTAINER_ID" touch "\${CONTAINER_WORKSPACE}/test-write-2" 2>/dev/null; then
+                echo "✅ Permissions fixed"
+                docker exec "\$NEW_CONTAINER_ID" rm -f "\${CONTAINER_WORKSPACE}/test-write-2"
+            else
+                echo "❌ Still cannot write to workspace"
+                exit 1
+            fi
         fi
-        
-        # Show workspace contents
-        echo "📁 Workspace contents:"
-        docker exec \$NEW_CONTAINER_ID ls -la \${CONTAINER_WORKSPACE}/ | head -5
         
     else
-        echo "❌ Workspace not accessible"
+        echo "❌ Workspace directory not accessible"
+        echo "🔍 Debugging container mounts..."
+        docker exec "\$NEW_CONTAINER_ID" ls -la /tmp/ || echo "Cannot list /tmp"
+        docker exec "\$NEW_CONTAINER_ID" mount | grep "\${CONTAINER_WORKSPACE}" || echo "No workspace mount found"
         exit 1
     fi
+    
+    # Show final status
+    echo "📁 Final workspace verification:"
+    docker exec "\$NEW_CONTAINER_ID" ls -la "\${CONTAINER_WORKSPACE}/" | head -5 || echo "Cannot show workspace contents"
+    
 else
-    echo "❌ Failed to start new container"
+    echo "❌ Container not running after start"
+    echo "🔍 Container status:"
+    docker ps -a --filter "name=\$CONTAINER_NAME"
+    echo "🔍 Container logs:"
+    docker logs "\$CONTAINER_NAME" 2>/dev/null | tail -20 || echo "No logs available"
     exit 1
 fi
 
@@ -586,16 +637,16 @@ echo "======================================"
 `;
 
   try {
-    console.log(`📤 Sending simplified SSM command to instance ${instanceId}...`);
+    console.log(`📤 Sending enhanced SSM command to instance ${instanceId}...`);
 
     const command = new SendCommandCommand({
       InstanceIds: [instanceId],
       DocumentName: "AWS-RunShellScript",
       Parameters: {
         commands: [setupScript],
-        executionTimeout: ["300"]
+        executionTimeout: ["600"]  // Increased to 10 minutes
       },
-      TimeoutSeconds: 300
+      TimeoutSeconds: 600
     });
 
     const response = await ssmClient.send(command);
@@ -613,6 +664,8 @@ echo "======================================"
     throw new Error(`Workspace setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
+
+
 
 /**
  * Wait for SSM command to complete and check status
