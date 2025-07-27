@@ -392,7 +392,7 @@ export async function removeInstanceProtection(
  * Setup user workspace using symlinks - SIMPLIFIED VERSION
  */
 export async function setupUserWorkspaceSymlink(instanceId: string, userId: string): Promise<void> {
-  console.log(`🔗 Setting up symlink workspace for user ${userId} on instance ${instanceId}`);
+  console.log(`🔗 Setting up persistent workspace for user ${userId} on instance ${instanceId}`);
 
   const setupScript = `#!/bin/bash
 set -e
@@ -402,7 +402,7 @@ EFS_USER_DIR="/mnt/efs/\${USER_ID}"
 CONTAINER_WORKSPACE="/tmp/custom-workspace"
 
 echo "======================================"
-echo "🎯 Setting up workspace for: \${USER_ID}"
+echo "🎯 Setting up persistent workspace for: \${USER_ID}"
 echo "======================================"
 
 # Check EFS mount
@@ -417,28 +417,83 @@ sudo mkdir -p "\${EFS_USER_DIR}"
 sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
 sudo chmod -R 755 "\${EFS_USER_DIR}"
 
-# Initialize workspace if new
+# Initialize workspace with VS Code persistence
 if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
-    echo "🎯 Initializing workspace..."
-    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/{projects,temp,bin}
+    echo "🎯 Initializing workspace with VS Code persistence..."
     
-    sudo -u "#1000" cat > "\${EFS_USER_DIR}/README.md" << 'EOF'
+    # Create workspace directories
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/workspace/{projects,temp,bin}
+    
+    # 🆕 CREATE VS CODE DIRECTORIES
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.vscode-server/{data/User,extensions}
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.vscode-server/data/User/{snippets,workspaceStorage}
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.config/code-server
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/.local/share/code-server
+    
+    # Create welcome file
+    sudo -u "#1000" cat > "\${EFS_USER_DIR}/workspace/README.md" << 'EOF'
 # Welcome ${userId}!
 
-🎉 Your persistent workspace is ready!
+🎉 Your persistent workspace with VS Code settings!
+
+## What's persistent now:
+- ✅ All your files and folders
+- ✅ VS Code extensions and themes
+- ✅ Settings and keybindings  
+- ✅ Code snippets
+- ✅ Terminal history
+- ✅ Open tabs and workspace state
 
 ## Directories:
-- projects/ - Your coding projects
-- temp/ - Temporary files  
-- bin/ - Custom scripts
+- workspace/projects/ - Your coding projects
+- workspace/temp/ - Temporary files
+- workspace/bin/ - Custom scripts
 
 Happy coding! 🚀
 EOF
 
-    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}/projects/hello-world"
-    sudo -u "#1000" echo "console.log('Hello from ${userId}!');" > "\${EFS_USER_DIR}/projects/hello-world/index.js"
+    # Create sample project
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}/workspace/projects/hello-world"
+    sudo -u "#1000" echo "console.log('Hello from ${userId}!');" > "\${EFS_USER_DIR}/workspace/projects/hello-world/index.js"
+    
+    # 🆕 CREATE DEFAULT VS CODE SETTINGS
+    sudo -u "#1000" cat > "\${EFS_USER_DIR}/.vscode-server/data/User/settings.json" << 'SETTINGS_EOF'
+{
+  "workbench.colorTheme": "Default Dark+",
+  "editor.fontSize": 14,
+  "editor.tabSize": 2,
+  "files.autoSave": "afterDelay",
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "git.enableSmartCommit": true,
+  "editor.formatOnSave": true,
+  "workbench.startupEditor": "readme",
+  "editor.minimap.enabled": false,
+  "workbench.editor.enablePreview": false,
+  "files.trimTrailingWhitespace": true,
+  "editor.renderWhitespace": "boundary"
+}
+SETTINGS_EOF
+
+    # 🆕 CREATE DEFAULT KEYBINDINGS
+    sudo -u "#1000" cat > "\${EFS_USER_DIR}/.vscode-server/data/User/keybindings.json" << 'KEYBINDINGS_EOF'
+[
+  {
+    "key": "ctrl+shift+t",
+    "command": "workbench.action.terminal.new"
+  },
+  {
+    "key": "ctrl+shift+e",
+    "command": "workbench.view.explorer"
+  }
+]
+KEYBINDINGS_EOF
+
     sudo -u "#1000" touch "\${EFS_USER_DIR}/.workspace-initialized"
-    echo "✅ Workspace initialized"
+    echo "✅ Workspace with VS Code persistence initialized"
+else
+    echo "📂 Using existing persistent workspace for \${USER_ID}"
+    sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
+    sudo chmod -R 755 "\${EFS_USER_DIR}"
 fi
 
 # Find container
@@ -450,8 +505,8 @@ fi
 
 echo "✅ Found container: \$CONTAINER_ID"
 
-# 🚀 APPROACH 1: Container restart with volume mount (most reliable)
-echo "🔄 Restarting container with user workspace..."
+# 🔄 RESTART CONTAINER WITH VS CODE PERSISTENCE
+echo "🔄 Restarting container with persistent VS Code data..."
 
 # Get current container info
 CONTAINER_NAME=\$(docker inspect --format='{{.Name}}' \$CONTAINER_ID | sed 's/^\\///')
@@ -465,14 +520,17 @@ echo "🛑 Stopping current container..."
 docker stop \$CONTAINER_ID
 docker rm \$CONTAINER_ID
 
-# Start new container with user's workspace mounted directly
-echo "🚀 Starting container with user workspace..."
+# 🆕 START NEW CONTAINER WITH VS CODE PERSISTENCE
+echo "🚀 Starting container with persistent workspace and VS Code data..."
 docker run -d \\
     --name \$CONTAINER_NAME \\
     --network=host \\
     --restart unless-stopped \\
     -v /mnt/efs:/mnt/efs \\
-    -v "\${EFS_USER_DIR}:\${CONTAINER_WORKSPACE}" \\
+    -v "\${EFS_USER_DIR}/workspace:\${CONTAINER_WORKSPACE}" \\
+    -v "\${EFS_USER_DIR}/.vscode-server:/home/coder/.vscode-server" \\
+    -v "\${EFS_USER_DIR}/.config:/home/coder/.config" \\
+    -v "\${EFS_USER_DIR}/.local:/home/coder/.local" \\
     -e ROUTER_URL="\$ROUTER_URL" \\
     \$CONTAINER_IMAGE
 
@@ -489,13 +547,19 @@ if [ -n "\$NEW_CONTAINER_ID" ]; then
     if docker exec \$NEW_CONTAINER_ID ls \${CONTAINER_WORKSPACE}/README.md >/dev/null 2>&1; then
         echo "✅ Workspace accessible"
         
+        # Test VS Code data access
+        if docker exec \$NEW_CONTAINER_ID ls /home/coder/.vscode-server/data/User/settings.json >/dev/null 2>&1; then
+            echo "✅ VS Code settings accessible"
+        else
+            echo "⚠️  VS Code settings not found (will be created by code-server)"
+        fi
+        
         # Test write permissions
         if docker exec \$NEW_CONTAINER_ID touch \${CONTAINER_WORKSPACE}/test-write 2>/dev/null; then
             echo "✅ Write permissions OK"
             docker exec \$NEW_CONTAINER_ID rm -f \${CONTAINER_WORKSPACE}/test-write
         else
             echo "⚠️  Write permissions issue, fixing..."
-            # Fix permissions from host
             sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
             echo "✅ Permissions fixed"
         fi
@@ -514,8 +578,9 @@ else
 fi
 
 echo "======================================"
-echo "🎉 Workspace setup complete!"
-echo "📁 User workspace: \${EFS_USER_DIR}"
+echo "🎉 Persistent workspace setup complete!"
+echo "📁 User workspace: \${EFS_USER_DIR}/workspace"
+echo "🔧 VS Code settings: \${EFS_USER_DIR}/.vscode-server"
 echo "🐳 Container workspace: \${CONTAINER_WORKSPACE}"
 echo "======================================"
 `;
