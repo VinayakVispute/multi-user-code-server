@@ -13,6 +13,7 @@ import {
   protectActiveInstances,
   removeInstanceProtection,
   safelyTerminateInstance,
+  setupUserWorkspaceSymlink,
   tagInstance,
   updateASGCapacity,
 } from "./awsUtils";
@@ -88,8 +89,7 @@ export async function allocateMachine(
       existingWorkspace?.publicIp
     ) {
       logger.info(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] Machine already allocated for user`,
         {
           userId,
@@ -113,8 +113,7 @@ export async function allocateMachine(
     instanceId = await popWarmSpare(requestId);
     if (!instanceId) {
       logger.warn(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] No warm spare available, ensuring capacity`,
         { userId }
       );
@@ -130,8 +129,7 @@ export async function allocateMachine(
     const publicIp = await getInstanceIP(instanceId, requestId);
     if (!publicIp) {
       logger.error(
-        `[${
-          requestId || "system"
+        `[${requestId || "system"
         }] [${functionName}] Instance has no public IP`,
         { userId, instanceId }
       );
@@ -139,6 +137,11 @@ export async function allocateMachine(
     }
 
     shouldRollback = true;
+
+    await setupUserWorkspaceSymlink(instanceId, userId);
+
+
+
     const subdomain = generateSubdomain(userName, instanceId);
     const httpsUrl = `https://${subdomain}.workspaces.codeclause.tech`;
     await createWorkspaceNginxConfig(subdomain, publicIp);
@@ -156,11 +159,11 @@ export async function allocateMachine(
     };
 
     await setUserWorkspace(userId, workspace, requestId);
-    await ensureCapacity(requestId);
+
+    // await ensureCapacity(requestId);
 
     logger.info(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Successfully allocated machine`,
       { userId, instanceId, publicIp }
     );
@@ -189,8 +192,7 @@ export async function allocateMachine(
         await removeInstanceProtection([instanceId], requestId);
       } catch (e) {
         logger.error(
-          `[${
-            requestId || "system"
+          `[${requestId || "system"
           }] [${functionName}] Failed to remove protection during rollback`,
           {
             instanceId,
@@ -202,8 +204,7 @@ export async function allocateMachine(
         await tagInstance(instanceId, "UNASSIGNED", requestId);
       } catch (e) {
         logger.error(
-          `[${
-            requestId || "system"
+          `[${requestId || "system"
           }] [${functionName}] Failed to retag instance during rollback`,
           {
             instanceId,
@@ -215,8 +216,7 @@ export async function allocateMachine(
         await addToWarmPool(instanceId, requestId);
       } catch (e) {
         logger.error(
-          `[${
-            requestId || "system"
+          `[${requestId || "system"
           }] [${functionName}] Failed to return instance to warm pool during rollback`,
           {
             instanceId,
@@ -277,8 +277,7 @@ export async function getSystemStatus(requestId: string): Promise<{
     return status;
   } catch (error) {
     logger.error(
-      `[${
-        requestId || "system"
+      `[${requestId || "system"
       }] [${functionName}] Failed to get system status`,
       { error: error instanceof Error ? error.message : "Unknown error" }
     );
