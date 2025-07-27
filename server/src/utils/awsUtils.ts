@@ -405,7 +405,8 @@ echo "🎯 Setting up symlink workspace for user: \${USER_ID}"
 
 # Create user directory on EFS
 sudo mkdir -p "\${EFS_USER_DIR}"
-sudo chown 1000:1000 "\${EFS_USER_DIR}"  # coder user UID:GID
+sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
+sudo chmod -R 755 "\${EFS_USER_DIR}
 
 # Initialize workspace if new user
 if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
@@ -483,34 +484,53 @@ echo "🔗 Creating symlink to user's EFS directory..."
 CONTAINER_ID=\$(docker ps --filter "name=code-server-warm" --format "{{.ID}}")
 
 if [ -n "\$CONTAINER_ID" ]; then
-    # Execute inside the running container to set up the symlink
+    echo "📦 Container ID: \$CONTAINER_ID"
+    
+    # Execute inside the running container
     sudo docker exec -u root \$CONTAINER_ID bash -c "
-        echo 'Setting up workspace symlink inside container...'
+        echo 'Current workspace state:'
+        ls -la /tmp/ | grep custom-workspace || echo 'No custom-workspace found'
         
-        # Remove the existing workspace directory/symlink
+        # 🔧 CRITICAL: Remove the existing directory/symlink completely
         rm -rf \${CONTAINER_WORKSPACE}
         
-        # Create symlink to user's EFS directory
+        # 🎯 Create symlink so /tmp/custom-workspace IS the user's EFS directory
         ln -sf \${EFS_USER_DIR} \${CONTAINER_WORKSPACE}
         
-        # Verify symlink
-        if [ -L \${CONTAINER_WORKSPACE} ]; then
-            echo '✅ Symlink created successfully'
-            ls -la \${CONTAINER_WORKSPACE}/
+        # Verify the symlink
+        echo 'After symlink creation:'
+        ls -la /tmp/ | grep custom-workspace
+        
+        # Test that we're directly in the user's directory
+        echo 'Contents of workspace (should be user files directly):'
+        ls -la \${CONTAINER_WORKSPACE}/
+        
+        # Test write permissions
+        if touch \${CONTAINER_WORKSPACE}/test-write 2>/dev/null; then
+            echo '✅ Write permissions OK'
+            rm -f \${CONTAINER_WORKSPACE}/test-write
         else
-            echo '❌ Failed to create symlink'
+            echo '❌ Write permissions FAILED'
+            ls -ldn \${CONTAINER_WORKSPACE}
             exit 1
         fi
+        
+        echo '✅ Symlink setup successful'
     "
     
-    echo "✅ User \${USER_ID} workspace ready - NO RESTART NEEDED!"
-    echo "📁 Workspace location: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}"
+    if [ \$? -eq 0 ]; then
+        echo "✅ User \${USER_ID} workspace ready!"
+        echo "📁 /tmp/custom-workspace now points directly to /mnt/efs/\${USER_ID}"
+    else
+        echo "❌ Failed to setup workspace symlink"
+        exit 1
+    fi
 else
-    echo "❌ Container 'code-server-warm' not found"
+    echo "❌ Container not found"
     exit 1
 fi
 
-echo "🎉 Symlink workspace setup complete for \${USER_ID}"
+echo "🎉 Workspace setup complete for \${USER_ID}"
 `;
 
   try {
