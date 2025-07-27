@@ -389,10 +389,7 @@ export async function removeInstanceProtection(
 
 
 /**
- * Setup user workspace using symlinks - FIXED PERMISSIONS
- */
-/**
- * Setup user workspace using symlinks - FIXED PERMISSIONS
+ * Setup user workspace using symlinks - SIMPLIFIED VERSION
  */
 export async function setupUserWorkspaceSymlink(instanceId: string, userId: string): Promise<void> {
   console.log(`🔗 Setting up symlink workspace for user ${userId} on instance ${instanceId}`);
@@ -406,238 +403,125 @@ CONTAINER_WORKSPACE="/tmp/custom-workspace"
 
 echo "======================================"
 echo "🎯 Setting up workspace for: \${USER_ID}"
-echo "🕒 Started at: \$(date)"
 echo "======================================"
 
-# Check if EFS is mounted
+# Check EFS mount
 if ! mountpoint -q /mnt/efs; then
-    echo "❌ EFS is not mounted at /mnt/efs"
+    echo "❌ EFS not mounted"
     exit 1
 fi
 
-echo "✅ EFS is mounted"
-
-# Create user directory on EFS with proper permissions
-echo "📁 Creating EFS directory: \${EFS_USER_DIR}"
+# Create and setup EFS directory
+echo "📁 Setting up EFS directory..."
 sudo mkdir -p "\${EFS_USER_DIR}"
 sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
 sudo chmod -R 755 "\${EFS_USER_DIR}"
 
-echo "✅ Permissions set: \$(ls -ld \${EFS_USER_DIR})"
-
-# Initialize workspace if new user
+# Initialize workspace if new
 if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
-    echo "🎯 Initializing new workspace for \${USER_ID}..."
+    echo "🎯 Initializing workspace..."
+    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/{projects,temp,bin}
     
-    # Create directory structure
-    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/{projects,temp,bin,.vscode-server}
-    
-    # Create welcome file
-    sudo -u "#1000" tee "\${EFS_USER_DIR}/README.md" > /dev/null << 'WELCOME_EOF'
+    sudo -u "#1000" cat > "\${EFS_USER_DIR}/README.md" << 'EOF'
 # Welcome ${userId}!
 
-🎉 This is your persistent workspace powered by AWS EFS.
+🎉 Your persistent workspace is ready!
 
-## What's persistent:
-- ✅ All your files and folders
-- ✅ VS Code settings and extensions
-- ✅ Terminal history and configurations
-- ✅ Git repositories and commit history
-
-## Directory Structure:
+## Directories:
 - projects/ - Your coding projects
-- temp/ - Temporary files
-- bin/ - Custom scripts and tools
+- temp/ - Temporary files  
+- bin/ - Custom scripts
 
 Happy coding! 🚀
-WELCOME_EOF
+EOF
 
-    # Create sample project
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}/projects/hello-world"
-    sudo -u "#1000" tee "\${EFS_USER_DIR}/projects/hello-world/index.js" > /dev/null << 'SAMPLE_EOF'
-// Welcome to your persistent workspace!
-console.log('Hello from ${userId}!');
-console.log('This file will persist across sessions 🎉');
-
-const message = 'Your persistent development environment is ready!';
-console.log(message);
-SAMPLE_EOF
-
-    # Create .gitconfig
-    sudo -u "#1000" tee "\${EFS_USER_DIR}/.gitconfig" > /dev/null << 'GITCONFIG_EOF'
-[user]
-    name = ${userId}
-    email = ${userId}@workspace.local
-[init]
-    defaultBranch = main
-[core]
-    editor = code
-GITCONFIG_EOF
-    
-    # Mark as initialized
+    sudo -u "#1000" echo "console.log('Hello from ${userId}!');" > "\${EFS_USER_DIR}/projects/hello-world/index.js"
     sudo -u "#1000" touch "\${EFS_USER_DIR}/.workspace-initialized"
-    echo "✅ Workspace initialized for \${USER_ID}"
-else
-    echo "📂 Using existing workspace for \${USER_ID}"
-    sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
-    sudo chmod -R 755 "\${EFS_USER_DIR}"
-    echo "✅ Fixed permissions on existing workspace"
+    echo "✅ Workspace initialized"
 fi
 
 # Find container
-echo "🔍 Looking for code-server container..."
 CONTAINER_ID=\$(docker ps --filter "name=code-server" --format "{{.ID}}" | head -1)
-
 if [ -z "\$CONTAINER_ID" ]; then
-    echo "❌ No code-server container found"
-    docker ps --format "table {{.Names}}\\t{{.Status}}"
+    echo "❌ No container found"
     exit 1
 fi
 
 echo "✅ Found container: \$CONTAINER_ID"
 
-# 🔧 FIXED: Setup symlink with proper permissions
-echo "🔗 Setting up symlink inside container..."
+# 🚀 APPROACH 1: Container restart with volume mount (most reliable)
+echo "🔄 Restarting container with user workspace..."
 
-# Execute as coder user (UID 1000) to avoid permission issues
-if docker exec -u 1000 \$CONTAINER_ID bash -c "
-    set -e
-    echo 'Container symlink setup started as user: \$(whoami) (UID: \$(id -u))'
-    
-    # Check current workspace state
-    echo 'Current workspace state:'
-    ls -la /tmp/ | grep custom-workspace || echo 'No custom-workspace found'
-    
-    # Check if workspace exists and what type it is
-    if [ -e \${CONTAINER_WORKSPACE} ]; then
-        echo 'Workspace exists. Type:'
-        file \${CONTAINER_WORKSPACE}
-        
-        # If it's a directory, check if we can remove it
-        if [ -d \${CONTAINER_WORKSPACE} ] && [ ! -L \${CONTAINER_WORKSPACE} ]; then
-            echo 'Removing existing directory...'
-            rm -rf \${CONTAINER_WORKSPACE}
-            echo 'Directory removed'
-        elif [ -L \${CONTAINER_WORKSPACE} ]; then
-            echo 'Removing existing symlink...'
-            rm -f \${CONTAINER_WORKSPACE}
-            echo 'Symlink removed'
-        else
-            echo 'Unknown workspace type, attempting to remove...'
-            rm -rf \${CONTAINER_WORKSPACE}
-        fi
-    else
-        echo 'No existing workspace to remove'
-    fi
-    
-    # Create symlink
-    echo 'Creating symlink: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}'
-    if ln -sf \${EFS_USER_DIR} \${CONTAINER_WORKSPACE}; then
-        echo 'Symlink created successfully'
-    else
-        echo 'Failed to create symlink'
-        exit 1
-    fi
-    
-    # Verify symlink
-    echo 'Verifying symlink...'
-    if [ -L \${CONTAINER_WORKSPACE} ]; then
-        echo 'Symlink exists and points to: '\$(readlink \${CONTAINER_WORKSPACE})
-        
-        # Check if target exists
-        if [ -d \${EFS_USER_DIR} ]; then
-            echo 'Target directory exists'
-        else
-            echo 'Target directory missing!'
-            exit 1
-        fi
-        
-        # Test read access
-        if ls \${CONTAINER_WORKSPACE}/ >/dev/null 2>&1; then
-            echo 'Can read workspace contents'
-        else
-            echo 'Cannot read workspace contents'
-            exit 1
-        fi
-        
-        # Test write access
-        TEST_FILE=\${CONTAINER_WORKSPACE}/test-write-\$(date +%s)
-        if touch \"\$TEST_FILE\" 2>/dev/null; then
-            echo 'Write permissions OK'
-            rm -f \"\$TEST_FILE\"
-        else
-            echo 'Write permissions FAILED'
-            echo 'Workspace permissions:'
-            ls -ld \${CONTAINER_WORKSPACE}
-            exit 1
-        fi
-        
-        echo 'All tests passed!'
-    else
-        echo 'Symlink was not created'
-        exit 1
-    fi
-"; then
-    echo "✅ Symlink setup successful!"
-else
-    echo "❌ Symlink setup failed"
-    
-    # 🔧 Fallback: Try with root user and fix permissions
-    echo "🔄 Trying fallback approach with root user..."
-    
-    if docker exec -u root \$CONTAINER_ID bash -c "
-        set -e
-        echo 'Fallback: Using root to fix permissions...'
-        
-        # Force remove with root permissions
-        if [ -e \${CONTAINER_WORKSPACE} ]; then
-            echo 'Force removing existing workspace...'
-            rm -rf \${CONTAINER_WORKSPACE}
-        fi
-        
-        # Create symlink as root
-        ln -sf \${EFS_USER_DIR} \${CONTAINER_WORKSPACE}
-        
-        # Change ownership to coder user
-        chown -h 1000:1000 \${CONTAINER_WORKSPACE}
-        
-        echo 'Fallback successful'
-    "; then
-        echo "✅ Fallback approach worked!"
-    else
-        echo "❌ Both approaches failed"
-        exit 1
-    fi
-fi
+# Get current container info
+CONTAINER_NAME=\$(docker inspect --format='{{.Name}}' \$CONTAINER_ID | sed 's/^\\///')
+CONTAINER_IMAGE=\$(docker inspect --format='{{.Config.Image}}' \$CONTAINER_ID)
+ROUTER_URL=\$(docker inspect --format='{{range .Config.Env}}{{if contains . "ROUTER_URL"}}{{.}}{{end}}{{end}}' \$CONTAINER_ID | cut -d'=' -f2)
 
-# Final verification
-echo "🔍 Final verification..."
-WORKSPACE_TARGET=\$(docker exec \$CONTAINER_ID readlink \${CONTAINER_WORKSPACE} 2>/dev/null || echo "not-a-symlink")
-if [ "\$WORKSPACE_TARGET" = "\${EFS_USER_DIR}" ]; then
-    echo "✅ Symlink verified: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}"
+echo "Container info: \$CONTAINER_NAME, Image: \$CONTAINER_IMAGE"
+
+# Stop current container
+echo "🛑 Stopping current container..."
+docker stop \$CONTAINER_ID
+docker rm \$CONTAINER_ID
+
+# Start new container with user's workspace mounted directly
+echo "🚀 Starting container with user workspace..."
+docker run -d \\
+    --name \$CONTAINER_NAME \\
+    --network=host \\
+    --restart unless-stopped \\
+    -v /mnt/efs:/mnt/efs \\
+    -v "\${EFS_USER_DIR}:\${CONTAINER_WORKSPACE}" \\
+    -e ROUTER_URL="\$ROUTER_URL" \\
+    \$CONTAINER_IMAGE
+
+# Wait for container to start
+sleep 5
+
+# Verify new container
+NEW_CONTAINER_ID=\$(docker ps --filter "name=\$CONTAINER_NAME" --format "{{.ID}}")
+if [ -n "\$NEW_CONTAINER_ID" ]; then
+    echo "✅ New container started: \$NEW_CONTAINER_ID"
+    
+    # Test workspace access
+    echo "🔍 Testing workspace access..."
+    if docker exec \$NEW_CONTAINER_ID ls \${CONTAINER_WORKSPACE}/README.md >/dev/null 2>&1; then
+        echo "✅ Workspace accessible"
+        
+        # Test write permissions
+        if docker exec \$NEW_CONTAINER_ID touch \${CONTAINER_WORKSPACE}/test-write 2>/dev/null; then
+            echo "✅ Write permissions OK"
+            docker exec \$NEW_CONTAINER_ID rm -f \${CONTAINER_WORKSPACE}/test-write
+        else
+            echo "⚠️  Write permissions issue, fixing..."
+            # Fix permissions from host
+            sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
+            echo "✅ Permissions fixed"
+        fi
+        
+        # Show workspace contents
+        echo "📁 Workspace contents:"
+        docker exec \$NEW_CONTAINER_ID ls -la \${CONTAINER_WORKSPACE}/ | head -5
+        
+    else
+        echo "❌ Workspace not accessible"
+        exit 1
+    fi
 else
-    echo "❌ Symlink verification failed. Expected: \${EFS_USER_DIR}, Got: \$WORKSPACE_TARGET"
+    echo "❌ Failed to start new container"
     exit 1
 fi
 
-# Check workspace contents
-FILE_COUNT=\$(docker exec \$CONTAINER_ID ls -1 \${CONTAINER_WORKSPACE}/ 2>/dev/null | wc -l || echo "0")
-echo "📁 Workspace contains \$FILE_COUNT files/directories"
-
-if [ "\$FILE_COUNT" -gt 0 ]; then
-    echo "📋 Workspace contents:"
-    docker exec \$CONTAINER_ID ls -la \${CONTAINER_WORKSPACE}/ | head -5
-fi
-
 echo "======================================"
-echo "🎉 Workspace setup complete for \${USER_ID}"
-echo "📁 Workspace: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}"
-echo "🕒 Completed at: \$(date)"
+echo "🎉 Workspace setup complete!"
+echo "📁 User workspace: \${EFS_USER_DIR}"
+echo "🐳 Container workspace: \${CONTAINER_WORKSPACE}"
 echo "======================================"
 `;
 
   try {
-    console.log(`📤 Sending SSM command to instance ${instanceId}...`);
+    console.log(`📤 Sending simplified SSM command to instance ${instanceId}...`);
 
     const command = new SendCommandCommand({
       InstanceIds: [instanceId],
@@ -657,13 +541,11 @@ echo "======================================"
     }
 
     console.log(`✅ SSM command sent: ${commandId}`);
-
-    // Wait for command to complete
     await waitForSSMCommand(commandId, instanceId);
 
   } catch (error) {
-    console.error(`❌ Failed to setup workspace via symlink:`, error);
-    throw new Error(`Symlink workspace setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.error(`❌ Failed to setup workspace:`, error);
+    throw new Error(`Workspace setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 
