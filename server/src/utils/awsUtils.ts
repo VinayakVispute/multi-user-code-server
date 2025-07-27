@@ -12,7 +12,7 @@ import {
 } from "@aws-sdk/client-auto-scaling";
 import { InstanceInfo } from "../types";
 import logger from "./logger";
-import { SendCommandCommand } from "@aws-sdk/client-ssm";
+import { GetCommandInvocationCommand, SendCommandCommand } from "@aws-sdk/client-ssm";
 
 export async function getInstanceIP(
   instanceId: string,
@@ -401,22 +401,58 @@ USER_ID="${userId}"
 EFS_USER_DIR="/mnt/efs/\${USER_ID}"
 CONTAINER_WORKSPACE="/tmp/custom-workspace"
 
-echo "🎯 Setting up symlink workspace for user: \${USER_ID}"
+echo "======================================"
+echo "🎯 Setting up workspace for: \${USER_ID}"
+echo "🕒 Started at: \$(date)"
+echo "======================================"
 
-# Create user directory on EFS
-sudo mkdir -p "\${EFS_USER_DIR}"
-sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
-sudo chmod -R 755 "\${EFS_USER_DIR}
+# Debug: Check current state
+echo "🔍 Current system state:"
+echo "- Instance ID: \$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'Cannot get instance ID')"
+echo "- EFS mount status: \$(mount | grep efs | wc -l) EFS mounts found"
+echo "- Docker status: \$(docker info >/dev/null 2>&1 && echo 'Running' || echo 'Not running')"
+
+# Check if EFS is mounted
+if ! mountpoint -q /mnt/efs; then
+    echo "❌ EFS is not mounted at /mnt/efs"
+    echo "Available mounts:"
+    mount | grep -E "(efs|nfs)" || echo "No EFS/NFS mounts found"
+    exit 1
+fi
+
+echo "✅ EFS is mounted"
+
+# Create user directory on EFS with proper permissions
+echo "📁 Creating EFS directory: \${EFS_USER_DIR}"
+if sudo mkdir -p "\${EFS_USER_DIR}"; then
+    echo "✅ Directory created"
+else
+    echo "❌ Failed to create directory"
+    exit 1
+fi
+
+# Set ownership and permissions
+if sudo chown -R 1000:1000 "\${EFS_USER_DIR}" && sudo chmod -R 755 "\${EFS_USER_DIR}"; then
+    echo "✅ Permissions set: \$(ls -ld \${EFS_USER_DIR})"
+else
+    echo "❌ Failed to set permissions"
+    exit 1
+fi
 
 # Initialize workspace if new user
 if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
     echo "🎯 Initializing new workspace for \${USER_ID}..."
     
     # Create directory structure
-    sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/{projects,temp,bin}
+    if sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}"/{projects,temp,bin,.vscode-server}; then
+        echo "✅ Directory structure created"
+    else
+        echo "❌ Failed to create directory structure"
+        exit 1
+    fi
     
     # Create welcome file
-    sudo -u "#1000" cat > "\${EFS_USER_DIR}/README.md" << 'EOF'
+    sudo -u "#1000" tee "\${EFS_USER_DIR}/README.md" > /dev/null << 'WELCOME_EOF'
 # Welcome ${userId}!
 
 🎉 This is your persistent workspace powered by AWS EFS.
@@ -428,23 +464,23 @@ if [ ! -f "\${EFS_USER_DIR}/.workspace-initialized" ]; then
 - ✅ Git repositories and commit history
 
 ## Directory Structure:
-- \`projects/\` - Your coding projects
-- \`temp/\` - Temporary files
-- \`bin/\` - Custom scripts and tools
+- projects/ - Your coding projects
+- temp/ - Temporary files
+- bin/ - Custom scripts and tools
 
 ## Getting Started:
-1. Open the \`projects\` folder
-2. Create a new project: \`mkdir projects/my-awesome-project\`
+1. Open the projects folder
+2. Create a new project: mkdir projects/my-awesome-project
 3. Start coding! Everything is automatically saved.
 
 Your workspace will be exactly the same every time you get a new machine.
 
 Happy coding! 🚀
-EOF
+WELCOME_EOF
 
     # Create sample project
     sudo -u "#1000" mkdir -p "\${EFS_USER_DIR}/projects/hello-world"
-    sudo -u "#1000" cat > "\${EFS_USER_DIR}/projects/hello-world/index.js" << 'EOF'
+    sudo -u "#1000" tee "\${EFS_USER_DIR}/projects/hello-world/index.js" > /dev/null << 'SAMPLE_EOF'
 // Welcome to your persistent workspace!
 console.log('Hello from ${userId}!');
 console.log('This file will persist across sessions 🎉');
@@ -454,11 +490,17 @@ console.log('This file will persist across sessions 🎉');
 
 const message = 'Your persistent development environment is ready!';
 console.log(message);
-EOF
 
-    # Create .gitconfig if it doesn't exist
-    if [ ! -f "\${EFS_USER_DIR}/.gitconfig" ]; then
-        sudo -u "#1000" cat > "\${EFS_USER_DIR}/.gitconfig" << 'EOF'
+// Create a simple function
+function welcomeUser(name) {
+    return \`Welcome to your workspace, \${name}!\`;
+}
+
+console.log(welcomeUser('${userId}'));
+SAMPLE_EOF
+
+    # Create .gitconfig
+    sudo -u "#1000" tee "\${EFS_USER_DIR}/.gitconfig" > /dev/null << 'GITCONFIG_EOF'
 [user]
     name = ${userId}
     email = ${userId}@workspace.local
@@ -466,71 +508,302 @@ EOF
     defaultBranch = main
 [core]
     editor = code
-EOF
-    fi
+    autocrlf = false
+[pull]
+    rebase = false
+GITCONFIG_EOF
+
+    # Create .bashrc for custom shell setup
+    sudo -u "#1000" tee "\${EFS_USER_DIR}/.bashrc" > /dev/null << 'BASHRC_EOF'
+# Custom bashrc for ${userId}
+export PS1="\\[\\033[01;32m\\]${userId}@workspace\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ "
+export EDITOR=code
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+echo "Welcome back to your persistent workspace, ${userId}!"
+BASHRC_EOF
     
     # Mark as initialized
-    sudo -u "#1000" touch "\${EFS_USER_DIR}/.workspace-initialized"
-    
-    echo "✅ Workspace initialized for \${USER_ID}"
-else
-    echo "📂 Using existing workspace for \${USER_ID}"
-fi
-
-# 🎯 KEY: Replace workspace with symlink (NO RESTART NEEDED)
-echo "🔗 Creating symlink to user's EFS directory..."
-
-# Get container ID
-CONTAINER_ID=\$(docker ps --filter "name=code-server-warm" --format "{{.ID}}")
-
-if [ -n "\$CONTAINER_ID" ]; then
-    echo "📦 Container ID: \$CONTAINER_ID"
-    
-    # Execute inside the running container
-    sudo docker exec -u root \$CONTAINER_ID bash -c "
-        echo 'Current workspace state:'
-        ls -la /tmp/ | grep custom-workspace || echo 'No custom-workspace found'
-        
-        # 🔧 CRITICAL: Remove the existing directory/symlink completely
-        rm -rf \${CONTAINER_WORKSPACE}
-        
-        # 🎯 Create symlink so /tmp/custom-workspace IS the user's EFS directory
-        ln -sf \${EFS_USER_DIR} \${CONTAINER_WORKSPACE}
-        
-        # Verify the symlink
-        echo 'After symlink creation:'
-        ls -la /tmp/ | grep custom-workspace
-        
-        # Test that we're directly in the user's directory
-        echo 'Contents of workspace (should be user files directly):'
-        ls -la \${CONTAINER_WORKSPACE}/
-        
-        # Test write permissions
-        if touch \${CONTAINER_WORKSPACE}/test-write 2>/dev/null; then
-            echo '✅ Write permissions OK'
-            rm -f \${CONTAINER_WORKSPACE}/test-write
-        else
-            echo '❌ Write permissions FAILED'
-            ls -ldn \${CONTAINER_WORKSPACE}
-            exit 1
-        fi
-        
-        echo '✅ Symlink setup successful'
-    "
-    
-    if [ \$? -eq 0 ]; then
-        echo "✅ User \${USER_ID} workspace ready!"
-        echo "📁 /tmp/custom-workspace now points directly to /mnt/efs/\${USER_ID}"
+    if sudo -u "#1000" touch "\${EFS_USER_DIR}/.workspace-initialized"; then
+        echo "✅ Workspace initialized for \${USER_ID}"
     else
-        echo "❌ Failed to setup workspace symlink"
+        echo "❌ Failed to mark workspace as initialized"
         exit 1
     fi
 else
-    echo "❌ Container not found"
+    echo "📂 Using existing workspace for \${USER_ID}"
+    # Fix permissions on existing workspace
+    sudo chown -R 1000:1000 "\${EFS_USER_DIR}"
+    sudo chmod -R 755 "\${EFS_USER_DIR}"
+    echo "✅ Fixed permissions on existing workspace"
+fi
+
+# Find and verify container
+echo "🔍 Looking for code-server container..."
+CONTAINER_ID=""
+
+# Try different container name patterns
+for pattern in "code-server-warm" "code-server" "*code-server*"; do
+    CONTAINER_ID=\$(docker ps --filter "name=\${pattern}" --format "{{.ID}}" | head -1)
+    if [ -n "\$CONTAINER_ID" ]; then
+        echo "✅ Found container with pattern '\${pattern}': \$CONTAINER_ID"
+        break
+    fi
+done
+
+if [ -z "\$CONTAINER_ID" ]; then
+    echo "❌ No code-server container found"
+    echo "Available containers:"
+    docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"
     exit 1
 fi
 
+# Verify container is running
+CONTAINER_STATUS=\$(docker inspect --format='{{.State.Status}}' \$CONTAINER_ID 2>/dev/null || echo "unknown")
+if [ "\$CONTAINER_STATUS" != "running" ]; then
+    echo "❌ Container \$CONTAINER_ID is not running (status: \$CONTAINER_STATUS)"
+    exit 1
+fi
+
+echo "✅ Container \$CONTAINER_ID is running"
+
+# Setup symlink inside container
+echo "🔗 Setting up symlink inside container..."
+
+# Create the symlink setup script
+SYMLINK_SCRIPT="
+set -e
+echo 'Container symlink setup started...'
+
+# Check current workspace state
+echo 'Current /tmp contents:'
+ls -la /tmp/ | grep custom-workspace || echo 'No custom-workspace found'
+
+# Remove existing workspace
+if [ -e \${CONTAINER_WORKSPACE} ]; then
+    echo 'Removing existing workspace...'
+    rm -rf \${CONTAINER_WORKSPACE}
+    echo 'Existing workspace removed'
+else
+    echo 'No existing workspace to remove'
+fi
+
+# Create symlink
+echo 'Creating symlink: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}'
+if ln -sf \${EFS_USER_DIR} \${CONTAINER_WORKSPACE}; then
+    echo 'Symlink created successfully'
+else
+    echo 'Failed to create symlink'
+    exit 1
+fi
+
+# Verify symlink
+echo 'Verifying symlink...'
+if [ -L \${CONTAINER_WORKSPACE} ]; then
+    echo 'Symlink exists'
+    echo 'Symlink details:'
+    ls -la /tmp/ | grep custom-workspace
+    
+    echo 'Symlink target:'
+    readlink \${CONTAINER_WORKSPACE}
+    
+    echo 'Target exists check:'
+    if [ -d \${EFS_USER_DIR} ]; then
+        echo 'Target directory exists'
+    else
+        echo 'Target directory does not exist!'
+        exit 1
+    fi
+else
+    echo 'Symlink was not created properly'
+    exit 1
+fi
+
+# Test workspace access
+echo 'Testing workspace access...'
+if [ -r \${CONTAINER_WORKSPACE}/README.md ]; then
+    echo 'Can read workspace files'
+else
+    echo 'Cannot read workspace files'
+    exit 1
+fi
+
+# Test write permissions
+echo 'Testing write permissions...'
+TEST_FILE=\${CONTAINER_WORKSPACE}/test-write-\$(date +%s)
+if touch \"\$TEST_FILE\" 2>/dev/null; then
+    echo 'Write permissions OK'
+    rm -f \"\$TEST_FILE\"
+else
+    echo 'Write permissions FAILED'
+    echo 'Workspace permissions:'
+    ls -ld \${CONTAINER_WORKSPACE}
+    echo 'Target permissions:'
+    ls -ld \${EFS_USER_DIR}
+    exit 1
+fi
+
+echo 'Symlink setup completed successfully!'
+"
+
+# Execute symlink setup in container
+if docker exec \$CONTAINER_ID bash -c "\$SYMLINK_SCRIPT"; then
+    echo "✅ Symlink setup successful!"
+else
+    echo "❌ Symlink setup failed"
+    echo "Container logs (last 20 lines):"
+    docker logs --tail 20 \$CONTAINER_ID
+    exit 1
+fi
+
+# Final verification
+echo "🔍 Final verification..."
+WORKSPACE_TARGET=\$(docker exec \$CONTAINER_ID readlink \${CONTAINER_WORKSPACE} 2>/dev/null || echo "not-a-symlink")
+if [ "\$WORKSPACE_TARGET" = "\${EFS_USER_DIR}" ]; then
+    echo "✅ Symlink verified: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}"
+else
+    echo "❌ Symlink verification failed. Expected: \${EFS_USER_DIR}, Got: \$WORKSPACE_TARGET"
+    exit 1
+fi
+
+# Check file count in workspace
+FILE_COUNT=\$(docker exec \$CONTAINER_ID ls -1 \${CONTAINER_WORKSPACE}/ 2>/dev/null | wc -l || echo "0")
+echo "📁 Workspace contains \$FILE_COUNT files/directories"
+
+echo "======================================"
 echo "🎉 Workspace setup complete for \${USER_ID}"
+echo "📁 Workspace: \${CONTAINER_WORKSPACE} -> \${EFS_USER_DIR}"
+echo "🕒 Completed at: \$(date)"
+echo "======================================"
+`;
+
+  try {
+    console.log(`📤 Sending SSM command to instance ${instanceId}...`);
+
+    const command = new SendCommandCommand({
+      InstanceIds: [instanceId],
+      DocumentName: "AWS-RunShellScript",
+      Parameters: {
+        commands: [setupScript],
+        executionTimeout: ["300"]  // 5 minutes timeout
+      },
+      TimeoutSeconds: 300
+    });
+
+    const response = await ssmClient.send(command);
+    const commandId = response.Command?.CommandId;
+
+    if (!commandId) {
+      throw new Error("No command ID received from SSM");
+    }
+
+    console.log(`✅ SSM command sent: ${commandId}`);
+    console.log(`🔍 Monitor at: https://console.aws.amazon.com/systems-manager/run-command/${commandId}`);
+
+    // Wait for command to complete with status checking
+    await waitForSSMCommand(commandId, instanceId);
+
+  } catch (error) {
+    console.error(`❌ Failed to setup workspace via symlink:`, error);
+    throw new Error(`Symlink workspace setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Wait for SSM command to complete and check status
+ */
+async function waitForSSMCommand(commandId: string, instanceId: string): Promise<void> {
+  const maxAttempts = 30; // 30 attempts * 10 seconds = 5 minutes max
+  let attempts = 0;
+
+  while (attempts < maxAttempts) {
+    attempts++;
+
+    try {
+      const invocation = await ssmClient.send(new GetCommandInvocationCommand({
+        CommandId: commandId,
+        InstanceId: instanceId
+      }));
+
+      const status = invocation.Status;
+      console.log(`⏳ SSM Command status (attempt ${attempts}): ${status}`);
+
+      if (status === 'Success') {
+        console.log(`✅ SSM command completed successfully`);
+        if (invocation.StandardOutputContent) {
+          console.log(`📋 Command output:\n${invocation.StandardOutputContent}`);
+        }
+        return;
+      } else if (status === 'Failed') {
+        console.error(`❌ SSM command failed`);
+        if (invocation.StandardErrorContent) {
+          console.error(`Error output:\n${invocation.StandardErrorContent}`);
+        }
+        if (invocation.StandardOutputContent) {
+          console.log(`Output:\n${invocation.StandardOutputContent}`);
+        }
+        throw new Error(`SSM command failed: ${invocation.StatusDetails || 'Unknown error'}`);
+      } else if (status === 'Cancelled' || status === 'TimedOut') {
+        throw new Error(`SSM command was ${status.toLowerCase()}`);
+      }
+
+      // Wait 10 seconds before next check
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
+    } catch (error) {
+      if (error instanceof Error && error.name === 'InvocationDoesNotExist') {
+        // Command might still be starting
+        console.log(`⏳ Command still initializing... (attempt ${attempts})`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(`SSM command timed out after ${maxAttempts * 10} seconds`);
+}
+
+/**
+ * Debug function to check machine state
+ */
+export async function debugMachineState(instanceId: string): Promise<void> {
+  const debugScript = `#!/bin/bash
+echo "🔍 Machine State Debug Report"
+echo "=============================="
+echo "Instance ID: \$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'Unknown')"
+echo "Timestamp: \$(date)"
+echo ""
+
+echo "🐳 Docker Status:"
+docker --version
+docker info 2>/dev/null | head -5 || echo "Docker not responding"
+echo ""
+
+echo "📦 Containers:"
+docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}" || echo "Cannot list containers"
+echo ""
+
+echo "🗂️ EFS Status:"
+mount | grep efs || echo "No EFS mounts"
+echo ""
+
+echo "📁 EFS Contents:"
+ls -la /mnt/efs/ 2>/dev/null | head -10 || echo "Cannot access /mnt/efs"
+echo ""
+
+echo "🔧 SSM Agent:"
+systemctl status amazon-ssm-agent --no-pager -l | head -10
+echo ""
+
+echo "💾 Disk Space:"
+df -h | grep -E "(Filesystem|/dev/)" || echo "Cannot check disk space"
+echo ""
+
+echo "🔍 Process Info:"
+ps aux | grep -E "(code-server|docker)" | head -5 || echo "No relevant processes"
 `;
 
   try {
@@ -538,19 +811,14 @@ echo "🎉 Workspace setup complete for \${USER_ID}"
       InstanceIds: [instanceId],
       DocumentName: "AWS-RunShellScript",
       Parameters: {
-        commands: [setupScript]
+        commands: [debugScript]
       },
-      TimeoutSeconds: 120
+      TimeoutSeconds: 60
     });
 
     const response = await ssmClient.send(command);
-    console.log(`✅ SSM command sent for symlink setup: ${response.Command?.CommandId}`);
-
-    // Wait a moment for setup to complete
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
+    console.log(`🔍 Debug command sent: ${response.Command?.CommandId}`);
   } catch (error) {
-    console.error(`Failed to setup workspace via symlink:`, error);
-    throw new Error(`Symlink workspace setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.error(`Failed to send debug command:`, error);
   }
 }
